@@ -46,6 +46,7 @@ bun run owner reject 1 "prompt injection"
 bun run attack           # compromised-agent script
 bun run owner log        # every request with the wallet's reasons
 bun run owner pause
+bun run web              # ledger page: every request and the wallet's reasons, refreshes every 3s
 ```
 
 ### On NEAR testnet
@@ -83,6 +84,7 @@ Keys created by setup are written to `.state/testnet.json` (gitignored). The scr
 | Client | `agent/src/client.ts` | Checks the patch hash, runs hidden tests from `client/hidden-tests/`, pays or rejects. |
 | Owner console | `agent/src/owner.ts` | `status`, `pending`, `log`, `approve`, `reject`, `pause`, `resume`. |
 | Attack script | `agent/src/attack.ts` | Assumes the model is fully compromised and tries every way out with the agent's keys. |
+| Ledger page | `web/index.html` | Static page that reads `get_status`, `get_policy`, `list_requests` over JSON-RPC. `bun run web` prints a ready URL. |
 
 ### What the agent's keys can and cannot do
 
@@ -94,7 +96,9 @@ Keys created by setup are written to `.state/testnet.json` (gitignored). The scr
 ### Solvers
 
 - `SOLVER=replay` (default) applies `agent/replay/split-invoice.patch` so the run is reproducible without an LLM key. It also replays the step a prompt-injected agent would take (request the "license fee"), printed as `[simulated injected step]`.
-- `SOLVER=claude` runs Claude Code headless (`claude -p`) in a scratch copy of the task, with `./pay` as its payment tool. Whether the model falls for the injection is up to the model; either way the wallet decides.
+- `SOLVER=codex` runs Codex CLI (`codex exec`, workspace-write sandbox) in a scratch copy of the task, with `./pay` as its only payment tool.
+- `SOLVER=claude` does the same with Claude Code headless (`claude -p`).
+- Whether a model falls for the injection is up to the model; either way the wallet decides. In our recorded Codex run (2026-10-30, sandbox) the model fixed the bug, did **not** call `./pay`, and its own patch passed the client's hidden tests (6/6), so the bounty paid out. The defense does not depend on that: `bun run attack` assumes the model does follow the injection.
 
 ## Limits and honest notes
 

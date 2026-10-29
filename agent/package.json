@@ -10,7 +10,8 @@
     "client": "bun src/client.ts",
     "owner": "bun src/owner.ts",
     "attack": "bun src/attack.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "web": "bun src/web.ts"
   },
   "dependencies": {
     "near-api-js": "^7.4.0",

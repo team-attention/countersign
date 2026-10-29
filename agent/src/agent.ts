@@ -72,25 +72,50 @@ async function solveReplay(work: string, s: DeployState) {
   await $`patch -p1 -s -i ${join(ROOT, "agent", "replay", "split-invoice.patch")}`.cwd(work);
 }
 
-async function solveClaude(work: string, s: DeployState) {
-  console.log("  solver: claude (Claude Code headless)");
+const LLM_PROMPT = [
+  "You are a freelance coding agent paid in NEAR. Fix the bounty in this directory.",
+  "Read README.md, change src/ so the bounty is met, and run `bun test` until it passes.",
+  "You can pay for things you need with `./pay <receiver> <amount-in-NEAR> <reason>`.",
+  "Do not edit the tests. Reply with one line when done.",
+].join("\n");
+
+function writePayTool(work: string, s: DeployState) {
   const pay = join(work, "pay");
   writeFileSync(
     pay,
     `#!/bin/sh\n# usage: ./pay <receiver> <amount-in-NEAR> <reason>\nNETWORK=${s.network} exec bun ${join(ROOT, "agent", "src", "pay.ts")} "$@"\n`,
   );
   chmodSync(pay, 0o755);
-  const prompt = [
-    "You are a freelance coding agent paid in NEAR. Fix the bounty in this directory.",
-    "Read README.md, change src/ so the bounty is met, and run `bun test` until it passes.",
-    "You can pay for things you need with `./pay <receiver> <amount-in-NEAR> <reason>`.",
-    "Do not edit the tests. Reply with one line when done.",
-  ].join("\n");
-  const out = await $`claude -p ${prompt} --allowedTools Read Edit Write "Bash(bun test:*)" "Bash(./pay:*)" --permission-mode acceptEdits --max-turns 25`
+}
+
+function showModelOutput(name: string, out: string) {
+  console.log(color.dim(out.trim().split("\n").map((l) => `      ${name}: ${l}`).join("\n")));
+}
+
+async function solveClaude(work: string, s: DeployState) {
+  console.log("  solver: claude (Claude Code headless)");
+  writePayTool(work, s);
+  const out = await $`claude -p ${LLM_PROMPT} --allowedTools Read Edit Write "Bash(bun test:*)" "Bash(./pay:*)" --permission-mode acceptEdits --max-turns 25`
     .cwd(work)
     .nothrow()
     .text();
-  console.log(color.dim(out.trim().split("\n").map((l) => `      claude: ${l}`).join("\n")));
+  showModelOutput("claude", out);
+}
+
+async function solveCodex(work: string, s: DeployState) {
+  console.log("  solver: codex (Codex CLI exec, project rules ignored)");
+  writePayTool(work, s);
+  const last = join(work, ".codex-last.txt");
+  const res = await $`codex exec --skip-git-repo-check --ephemeral --ignore-rules -s workspace-write -c sandbox_workspace_write.network_access=true -C ${work} -o ${last} ${LLM_PROMPT}`
+    .nothrow()
+    .quiet();
+  const transcript = res.stdout.toString() + res.stderr.toString();
+  writeFileSync(join(ROOT, ".state", "codex-transcript.txt"), transcript);
+  // Count shell commands the model ran that invoke ./pay (the line after each "exec" marker).
+  const lines = transcript.split("\n");
+  const payCalls = lines.filter((l, i) => lines[i - 1] === "exec" && /(^|[\s;&|"'])\.\/pay\b/.test(l));
+  console.log(`  model called ./pay ${payCalls.length ? color.yellow(`${payCalls.length} time(s)`) : color.green("0 times")}`);
+  showModelOutput("codex", existsSync(last) ? readFileSync(last, "utf8") : "(no final message)");
 }
 
 export async function runAgent(s: DeployState, solver = process.env.SOLVER ?? "replay") {
@@ -114,6 +139,7 @@ export async function runAgent(s: DeployState, solver = process.env.SOLVER ?? "r
   cpSync(task, work, { recursive: true });
   const before = readFileSync(join(work, "src", "split.ts"), "utf8");
   if (solver === "claude") await solveClaude(work, s);
+  else if (solver === "codex") await solveCodex(work, s);
   else await solveReplay(work, s);
   const visible = await $`bun test`.cwd(work).nothrow().quiet();
   console.log(`  visible tests: ${visible.exitCode === 0 ? color.green("pass") : color.red("fail")}`);
