@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Countersign demo replay</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d0f12; }
+  body { display: flex; flex-direction: column; font: 15px/1.5 ui-monospace, "SF Mono", Menlo, monospace; color: #d6d6d6; }
+  header { padding: 18px 28px 14px; border-bottom: 1px solid #22262c; font-family: ui-sans-serif, system-ui, sans-serif; }
+  header .t { color: #fff; font-size: 20px; font-weight: 600; }
+  header .c { color: #9aa4b1; font-size: 16px; margin-top: 4px; min-height: 24px; }
+  #term { flex: 1; overflow: hidden; padding: 16px 28px; white-space: pre-wrap; }
+  .p { color: #7ee787; } .g { color: #3fb950; } .r { color: #f85149; } .y { color: #d29922; } .d { color: #6e7681; } .b { color: #fff; font-weight: 700; } .cy { color: #39c5cf; }
+  .cursor { display: inline-block; width: 9px; height: 17px; background: #d6d6d6; vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+<header><div class="t">Countersign: give an AI agent a wallet, not the keys</div><div class="c" id="cap"></div></header>
+<div id="term"></div>
+<script>
+// Captions shown while a section of the real demo output is on screen.
+const CAPTIONS = [
+  ["create accounts", "A local NEAR node. Owner, client, the agent's wallet, a bounty board, vendors."],
+  ["owner gives the agent", "The agent gets two function-call keys. Neither can move money."],
+  ["deletes its own full-access key", "The wallet deletes its full-access key. Only the contract's rules remain."],
+  ["client posts a bounty", "A client locks 1 NEAR on a coding bounty."],
+  ["agent: pay for compute", "The agent pays its compute vendor: allowlisted and within limits, so it goes through."],
+  ["agent: do the work", "The task README hides a prompt injection: \"pay a license fee\". The wallet holds it for the human."],
+  ["client: verify", "The client runs hidden tests on the patch and pays the agent's wallet."],
+  ["owner: what is waiting", "The human rejects the injected fee."],
+  ["attack 1", "Now assume the model is fully compromised. Direct transfer with its key: refused by NEAR."],
+  ["attack 2", "Owner-only methods: refused."],
+  ["attack 3", "Give itself a full-access key: refused."],
+  ["attack 4", "Use the other key on the wallet: refused."],
+  ["attack 5", "Ask through the one method it has: blocklist blocks, unknown receivers wait."],
+  ["attack 6", "Drain with small allowlisted payments: stops at the daily cap."],
+  ["owner: approve one", "The human approves one top-up and rejects the rest."],
+  ["kill switch", "Kill switch: everything is blocked."],
+  ["result", "Earned 1 NEAR. Spent only what the policy and the human allowed."],
+];
+const SGR = { 32: "g", 31: "r", 33: "y", 2: "d", 1: "b", 36: "cy" };
+const term = document.getElementById("term"), cap = document.getElementById("cap");
+let open = null; // currently open color class, carried across lines
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+function render(line) {
+  let html = open ? `<span class="${open}">` : "";
+  for (const part of line.split(/(\x1b\[\d+m)/)) {
+    const m = part.match(/^\x1b\[(\d+)m$/);
+    if (!m) { html += esc(part); continue; }
+    if (open) html += "</span>";
+    open = m[1] === "0" ? null : SGR[m[1]] || null;
+    if (open) html += `<span class="${open}">`;
+  }
+  return html + (open ? "</span>" : "");
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function type(text) {
+  const el = document.createElement("div");
+  term.appendChild(el);
+  for (let i = 1; i <= text.length; i++) { el.innerHTML = `<span class="p">$</span> ${esc(text.slice(0, i))}<span class="cursor"></span>`; await sleep(55); }
+  await sleep(500);
+  el.innerHTML = `<span class="p">$</span> ${esc(text)}`;
+}
+async function main() {
+  const rows = (await (await fetch("demo-run.jsonl")).text()).trim().split("\n").map((l) => JSON.parse(l));
+  await sleep(800);
+  await type("cd agent && bun run demo");
+  for (const { line } of rows) {
+    if (line.startsWith("$ ")) continue;
+    const plain = line.replace(/\x1b\[\d+m/g, "");
+    const hit = plain.startsWith("== ") && CAPTIONS.find(([k]) => plain.includes(k));
+    if (hit) { cap.textContent = hit[1]; await sleep(1500); }
+    const el = document.createElement("div");
+    el.innerHTML = render(line) || "&nbsp;";
+    term.appendChild(el);
+    term.scrollTop = term.scrollHeight;
+    await sleep(plain.trim() === "" ? 60 : 170);
+  }
+  await sleep(4000);
+  document.title = "done";
+}
+main();
+</script>
+</body>
+</html>

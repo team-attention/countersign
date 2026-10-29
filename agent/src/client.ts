@@ -22,7 +22,7 @@ export async function verifyAndPay(s: DeployState, id = 0, patchPath = join(ROOT
   console.log(`  patch matches on-chain hash: ${hashOk ? color.green("yes") : color.red("no")}`);
   cpSync(join(ROOT, "client", "hidden-tests", "split-invoice"), join(work, "test"), { recursive: true });
   const res = await $`bun test`.cwd(work).nothrow().quiet();
-  const summary = res.stderr.toString().split("\n").filter((l) => /^\s*\d+ (pass|fail)/.test(l)).join(", ").trim();
+  const summary = res.stderr.toString().replace(/\x1b\[[0-9;]*m/g, "").split("\n").filter((l) => /^\s*\d+ (pass|fail)/.test(l)).join(", ").trim();
   console.log(`  hidden + visible tests: ${res.exitCode === 0 ? color.green("pass") : color.red("fail")} (${summary})`);
 
   const client = account(s, s.ids.client, s.keys.client);

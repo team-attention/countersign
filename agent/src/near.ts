@@ -91,7 +91,7 @@ export function ensureDir(p: string) {
 }
 
 // --- small console helpers, so every script prints the same way
-const c = (n: number) => (s: string) => (process.stdout.isTTY ? `\x1b[${n}m${s}\x1b[0m` : s);
+const c = (n: number) => (s: string) => (process.stdout.isTTY || process.env.FORCE_COLOR ? `\x1b[${n}m${s}\x1b[0m` : s);
 export const color = { green: c(32), red: c(31), yellow: c(33), dim: c(2), bold: c(1), cyan: c(36) };
 export function step(title: string) {
   console.log(`\n${color.bold(`== ${title}`)}`);
