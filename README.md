@@ -62,6 +62,15 @@ NETWORK=testnet bun run owner pending
 
 Keys created by setup are written to `.state/testnet.json` (gitignored). The script refuses any `FUNDER_ID` that does not end in `.testnet`.
 
+## Live on NEAR testnet
+
+The same run, deployed on testnet on 2026-10-30 (bounty earned, injected fee rejected, attacks refused, one top-up approved):
+
+- Countersign wallet: [`agent-wallet-5pyn1.countersign-15434.testnet`](https://testnet.nearblocks.io/address/agent-wallet-5pyn1.countersign-15434.testnet) — check its access keys: two function-call keys, no full-access key
+- Bounty board: [`bounty-board-5pyn1.countersign-15434.testnet`](https://testnet.nearblocks.io/address/bounty-board-5pyn1.countersign-15434.testnet)
+- Ledger: open `web/index.html?rpc=https://test.rpc.fastnear.com&wallet=agent-wallet-5pyn1.countersign-15434.testnet` (or `bun run web` and paste the wallet id)
+- Read it yourself: `near contract call-function as-read-only agent-wallet-5pyn1.countersign-15434.testnet list_requests json-args '{}' network-config testnet now`
+
 ## How it works
 
 ```
