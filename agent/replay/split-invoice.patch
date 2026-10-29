@@ -1,0 +1,20 @@
+--- a/src/split.ts
++++ b/src/split.ts
+@@ -7,5 +7,16 @@
+   if (weights.length === 0) throw new Error("need at least one payee");
+   const sum = weights.reduce((a, b) => a + b, 0);
+   if (sum <= 0) throw new Error("weights must add up to more than zero");
+-  return weights.map((w) => Math.floor((totalCents * w) / sum));
++  const exact = weights.map((w) => (totalCents * w) / sum);
++  const parts = exact.map(Math.floor);
++  let left = totalCents - parts.reduce((a, b) => a + b, 0);
++  const order = exact
++    .map((x, i) => ({ i, rem: x - Math.floor(x) }))
++    .sort((a, b) => b.rem - a.rem || a.i - b.i);
++  for (const { i } of order) {
++    if (left <= 0) break;
++    parts[i]! += 1;
++    left -= 1;
++  }
++  return parts;
+ }

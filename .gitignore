@@ -1,0 +1,7 @@
+node_modules/
+target/
+.state/
+.env
+.env.*
+*.log
+.DS_Store

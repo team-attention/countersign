@@ -1,0 +1,23 @@
+{
+  "name": "countersign-agent",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "demo": "bun src/demo.ts",
+    "sandbox": "bun src/sandbox.ts",
+    "setup:testnet": "bun src/setup.ts testnet",
+    "agent": "bun src/agent.ts",
+    "client": "bun src/client.ts",
+    "owner": "bun src/owner.ts",
+    "attack": "bun src/attack.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "near-api-js": "^7.4.0",
+    "near-sandbox": "^0.3.4"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
