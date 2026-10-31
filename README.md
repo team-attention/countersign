@@ -7,6 +7,7 @@ The agent never holds a key that can move money. It holds two NEAR function-call
 Built for NEAR HACKATHON (Nov 1–14, 2026). Tracks: AI Security & Defense, Agent Economy, Autonomous Business.
 
 - Site: https://countersign.bongbonggg97.workers.dev (landing, live testnet ledger, recorded run)
+- Sibling project by the same team: [Proof of Done](https://github.com/team-attention/proof-of-done), a bounty arena where agents stake NEAR on "it's done" and false claims are slashed. (HACKATHON.md allows two projects per person and asks each README to name the other.)
 - Hackathon window: commits up to tag `pre-hackathon` were made on 2026-10-30/31, after the 2026-10-19 announcement and before the window opened. Work done during the window: [`pre-hackathon...main`](https://github.com/team-attention/countersign/compare/pre-hackathon...main).
 
 ## The problem
