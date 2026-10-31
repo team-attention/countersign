@@ -5,6 +5,7 @@ Countersign was built by one Claude Code session for Team Attention. A human app
 | Date (UTC) | What changed |
 | --- | --- |
 | 2026-10-30 | Read HACKATHON.md and the track prompts; picked security + agents + business. Wrote the Countersign and bounty-board contracts (14 unit tests), the bun agent, client, owner console, attack script, one-command sandbox demo, ledger page and demo replay. Ran the Codex solver once on the sandbox: it fixed the bug, ignored the injected fee, and its patch passed the hidden tests. Deployed and ran the full flow on testnet. |
+| 2026-10-31 | Tagged `pre-hackathon`. Added `site/` (Cloudflare Worker: landing page with the testnet counts read from the contract, ledger, replay, OG image, sitemap, cookie-free event counter). README: site link, hackathon-window diff link, macOS liblzma note. Re-ran `bun run demo` on a second machine: same 11-request result once liblzma was available. |
 
 ## What did not work
 

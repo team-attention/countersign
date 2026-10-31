@@ -1,0 +1,12 @@
+name = "countersign"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[[kv_namespaces]]
+binding = "HITS"
+id = "9883d12352f34dc7a2acfbcb967bbbc0"

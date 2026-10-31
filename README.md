@@ -6,6 +6,9 @@ The agent never holds a key that can move money. It holds two NEAR function-call
 
 Built for NEAR HACKATHON (Nov 1–14, 2026). Tracks: AI Security & Defense, Agent Economy, Autonomous Business.
 
+- Site: https://countersign.bongbonggg97.workers.dev (landing, live testnet ledger, recorded run)
+- Hackathon window: commits up to tag `pre-hackathon` were made on 2026-10-30/31, after the 2026-10-19 announcement and before the window opened. Work done during the window: [`pre-hackathon...main`](https://github.com/team-attention/countersign/compare/pre-hackathon...main).
+
 ## The problem
 
 An agent that earns and spends money needs a wallet. If it holds a full-access key, one prompt injection is enough to empty it. Telling the model "don't pay strangers" is a prompt, and prompts can be overridden. Countersign moves the rule out of the prompt and into the account: the key cannot transfer, the contract decides, and a human countersigns anything outside the policy.
@@ -13,6 +16,8 @@ An agent that earns and spends money needs a wallet. If it holds a full-access k
 ## Try it (about 1 minute, no keys, no testnet funds)
 
 Requirements: [Bun](https://bun.sh) 1.2+ on macOS or Linux. The contracts are prebuilt in `contracts/out/`; Rust is only needed to rebuild them.
+
+On macOS the `near-sandbox` binary links Homebrew's liblzma. If the demo stops with `Binary doesn't respond, probably is corrupted`, run `brew install xz` and try again.
 
 1. `cd agent && bun install`
 2. `bun run demo`
@@ -68,7 +73,7 @@ The same run, deployed on testnet on 2026-10-30 (bounty earned, injected fee rej
 
 - Countersign wallet: [`agent-wallet-5pyn1.countersign-15434.testnet`](https://testnet.nearblocks.io/address/agent-wallet-5pyn1.countersign-15434.testnet) — check its access keys: two function-call keys, no full-access key
 - Bounty board: [`bounty-board-5pyn1.countersign-15434.testnet`](https://testnet.nearblocks.io/address/bounty-board-5pyn1.countersign-15434.testnet)
-- Ledger: open `web/index.html?rpc=https://test.rpc.fastnear.com&wallet=agent-wallet-5pyn1.countersign-15434.testnet` (or `bun run web` and paste the wallet id)
+- Ledger: [live page](https://countersign.bongbonggg97.workers.dev/ledger?rpc=https://test.rpc.fastnear.com&wallet=agent-wallet-5pyn1.countersign-15434.testnet) (or `bun run web` and paste the wallet id)
 - Read it yourself: `near contract call-function as-read-only agent-wallet-5pyn1.countersign-15434.testnet list_requests json-args '{}' network-config testnet now`
 
 ## How it works
