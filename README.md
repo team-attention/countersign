@@ -16,7 +16,7 @@ An agent that earns and spends money needs a wallet. If it holds a full-access k
 
 ## Try it (about 1 minute, no keys, no testnet funds)
 
-Requirements: [Bun](https://bun.sh) 1.2+ on macOS or Linux. The contracts are prebuilt in `contracts/out/`; Rust is only needed to rebuild them.
+Requirements: [Bun](https://bun.sh) 1.2+ on macOS or Linux. The contracts are prebuilt in `contracts/out/`; Rust is only needed to rebuild them (after `cargo near build`, copy the wasm into `contracts/out/` and run `python3 contracts/scrub-paths.py contracts/out/*.wasm` to replace local build paths).
 
 On macOS the `near-sandbox` binary links Homebrew's liblzma. If the demo stops with `Binary doesn't respond, probably is corrupted`, run `brew install xz` and try again.
 
