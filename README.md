@@ -33,11 +33,23 @@ On macOS the `near-sandbox` binary links Homebrew's liblzma. If the demo stops w
    - **Owner** approves one held top-up and rejects the rest; pauses the wallet; the next request is `BLOCKED` with `wallet is paused by the owner`.
    - **Result** line: `requests 11: auto-paid 5, owner-approved 1, owner-rejected 3, blocked 2, still pending 0`.
 
+### Shared watchlist (about 20 seconds)
+
+`bun run watchlist` starts its own local node with three Countersign wallets, three owners and one watchlist contract (a receiver is flagged once 2 different wallets reported it). The same injected "invoice" reaches each agent in turn:
+
+- Wallet A: `PENDING` (not allowlisted). Owner A calls `reject_and_report` → `reports 1/2`.
+- Wallet B: `PENDING` with the note `was reported by 1 wallet(s) on the shared watchlist`. Owner B reports → `reports 2/2 FLAGGED`.
+- Wallet C has that receiver on its own allowlist, and the request is still `BLOCKED` (`flagged on the shared watchlist`). A compute payment from wallet C is `AUTO-PAID`.
+- Each report is checked against the reporting wallet: `get_request` shows the rejected request and the owner's note.
+- A non-member account, wallet A's agent key, and a stranger calling `clear` are all refused.
+- The curator clears the receiver (appeal), and wallet C's next payment to it is `AUTO-PAID`.
+
 Run the contract unit tests (needs Rust and [`cargo-near`](https://github.com/near/cargo-near)):
 
 ```bash
 cd contracts/countersign && cargo test
 cd contracts/bounty-board && cargo test
+cd contracts/watchlist && cargo test
 ```
 
 ### Step by step on a local node
@@ -92,8 +104,9 @@ The same run, deployed on testnet on 2026-10-30 (bounty earned, injected fee rej
 
 | Piece | Path | What it does |
 | --- | --- | --- |
-| Countersign contract | `contracts/countersign/src/lib.rs` | Policy wallet. `request_payment` (agent), `approve` / `reject` / `set_policy` / `set_paused` / `add_agent_key` / `revoke_key` (owner, 1 yoctoNEAR so only a full-access key can sign), views `get_status`, `list_requests`, `list_pending`. Emits NEP-297 `EVENT_JSON` logs for every decision. |
+| Countersign contract | `contracts/countersign/src/lib.rs` | Policy wallet. `request_payment` (agent), `approve` / `reject` / `reject_and_report` / `set_watchlist` / `set_policy` / `set_paused` / `add_agent_key` / `revoke_key` (owner, 1 yoctoNEAR so only a full-access key can sign), views `get_status`, `list_requests`, `list_pending`. Emits NEP-297 `EVENT_JSON` logs for every decision. |
 | Bounty board contract | `contracts/bounty-board/src/lib.rs` | Client locks NEAR, worker submits a patch hash and a payout account, client accepts (pays) or rejects (reopens). |
+| Watchlist contract | `contracts/watchlist/src/lib.rs` | Shared list of receivers that member wallets rejected. `report` (member wallets only, one report per wallet per receiver, carries the request id as evidence), `check`, `get_reports`, `list_flagged`; curator `add_member` / `remove_member` / `clear` (appeal, logged). A Countersign wallet with `set_watchlist` checks it on every request that is not blocked outright: flagged → `BLOCKED`, reported → held for the owner even if allowlisted. |
 | Agent | `agent/src/agent.ts` | Finds a bounty, pays for compute, solves, runs visible tests, submits with payout to its own wallet. |
 | LLM payment tool | `agent/src/pay.ts` | `./pay <receiver> <amount> <reason>`: the only payment tool the model gets. It asks the wallet. |
 | Client | `agent/src/client.ts` | Checks the patch hash, runs hidden tests from `client/hidden-tests/`, pays or rejects. |
@@ -120,7 +133,8 @@ The same run, deployed on testnet on 2026-10-30 (bounty earned, injected fee rej
 - Testnet and local sandbox only. Nothing here touches mainnet.
 - The client's hidden tests ship in this repo (`client/hidden-tests/`) so judges can run them; the agent's scratch copy never contains them.
 - The patch itself is passed locally (`.state/bounty-<id>.patch`); only its sha256 goes on chain.
-- Policy decisions are per-wallet. A shared, evidence-backed blocklist across agents is the obvious next step.
+- The watchlist has a single curator who admits member wallets and handles appeals. Two colluding members could flag an honest receiver until the curator clears it; the threshold and membership are the defense, not cryptography. It runs in the local sandbox only so far.
+- With a watchlist set, `request_payment` returns after a cross-contract call (about one extra block).
 - No NEAR Intents: payments are native NEAR transfers. Intents have no testnet (HACKATHON.md Q-007).
 
 ## Built with

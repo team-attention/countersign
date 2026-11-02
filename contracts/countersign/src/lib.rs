@@ -5,6 +5,11 @@
 //! - `pending`:   anything else that is not obviously bad. Only the human owner can approve it.
 //! - `blocked`:   receiver is on the blocklist, the wallet is paused, or funds are short.
 //!
+//! - With a shared watchlist set (`set_watchlist`), every request that is not blocked outright is
+//!   checked against it first: a receiver flagged by enough wallets is `blocked`, one that some
+//!   wallet already reported is held for the owner even if it is allowlisted. The owner reports a
+//!   receiver with `reject_and_report`.
+//!
 //! The intended deployment gives the agent nothing but function-call access keys on this
 //! account (see `add_agent_key`), and removes every full-access key after setup. A function-call
 //! key cannot transfer NEAR, cannot attach a deposit and cannot add keys, so the only way money
@@ -14,14 +19,32 @@ use near_sdk::json_types::U128;
 use near_sdk::serde_json::json;
 use near_sdk::store::IterableMap;
 use near_sdk::{
-    AccountId, Allowance, BorshStorageKey, NearToken, PanicOnDefault, Promise,
-    PublicKey, env, near, require,
+    AccountId, Allowance, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise, PromiseError,
+    PromiseOrValue, PublicKey, env, ext_contract, near, require,
 };
 
 const DAY_NS: u64 = 86_400 * 1_000_000_000;
 const MAX_REASON_LEN: usize = 280;
 /// Balance kept on the account for storage; the agent can never spend it.
 const STORAGE_RESERVE: NearToken = NearToken::from_millinear(500);
+const WATCHLIST_CHECK_GAS: Gas = Gas::from_tgas(10);
+const WATCHLIST_REPORT_GAS: Gas = Gas::from_tgas(15);
+const DECIDE_GAS: Gas = Gas::from_tgas(40);
+
+/// The shared watchlist contract (`contracts/watchlist`).
+#[ext_contract(ext_watchlist)]
+#[allow(dead_code)]
+trait Watchlist {
+    fn check(&self, receiver: AccountId) -> WatchlistCheck;
+    fn report(&mut self, receiver: AccountId, request_id: u64, amount: U128, reason: String, note: String);
+}
+
+#[near(serializers = [json])]
+pub struct WatchlistCheck {
+    pub reports: u32,
+    pub threshold: u32,
+    pub flagged: bool,
+}
 
 #[near(serializers = [borsh])]
 #[derive(BorshStorageKey)]
@@ -80,6 +103,7 @@ pub struct WalletStatus {
     pub window_started_at_ns: u64,
     pub pending: u64,
     pub total_requests: u64,
+    pub watchlist: Option<AccountId>,
 }
 
 #[near(contract_state)]
@@ -95,6 +119,8 @@ pub struct Countersign {
     auto_spent_in_window: u128,
     /// Amount promised to in-flight transfers, so two quick requests cannot overspend.
     in_flight: u128,
+    /// Shared watchlist this wallet checks and reports to. `None` until the owner sets one.
+    watchlist: Option<AccountId>,
 }
 
 /// 1234500000000000000000000 -> "1.2345 NEAR" (trailing zeros trimmed, max 4 decimals).
@@ -132,6 +158,7 @@ impl Countersign {
             window_start_ns: env::block_timestamp(),
             auto_spent_in_window: 0,
             in_flight: 0,
+            watchlist: None,
         }
     }
 
@@ -139,12 +166,13 @@ impl Countersign {
 
     /// The only method the agent's key is allowed to call.
     /// Never panics on a policy decision: the decision is recorded and returned.
+    /// With a watchlist set the decision comes back from `on_watchlist` (same return value).
     pub fn request_payment(
         &mut self,
         receiver: AccountId,
         amount: U128,
         reason: String,
-    ) -> PaymentRequest {
+    ) -> PromiseOrValue<PaymentRequest> {
         require!(
             env::predecessor_account_id() == self.agent,
             "only the agent can request payments"
@@ -198,10 +226,29 @@ impl Countersign {
             req.decided_at_ns = Some(env::block_timestamp());
             emit("payment_blocked", json!(&req));
             self.requests.insert(id, req.clone());
-            return req;
+            return PromiseOrValue::Value(req);
         }
 
-        let mut hold = vec![];
+        if let Some(watchlist) = self.watchlist.clone() {
+            req.notes = vec!["checking the shared watchlist".to_string()];
+            self.requests.insert(id, req);
+            return PromiseOrValue::Promise(
+                ext_watchlist::ext(watchlist)
+                    .with_static_gas(WATCHLIST_CHECK_GAS)
+                    .check(receiver)
+                    .then(
+                        Self::ext(env::current_account_id())
+                            .with_static_gas(DECIDE_GAS)
+                            .on_watchlist(id),
+                    ),
+            );
+        }
+        PromiseOrValue::Value(self.decide(req, vec![]))
+    }
+
+    /// Auto-pay or hold for the owner. `hold` carries reasons found before the policy checks.
+    fn decide(&mut self, mut req: PaymentRequest, mut hold: Vec<String>) -> PaymentRequest {
+        let (id, receiver, amount) = (req.id, req.receiver.clone(), req.amount);
         if !self.policy.allowlist.contains(&receiver) {
             hold.push(format!("{receiver} is not on the allowlist"));
         }
@@ -217,6 +264,13 @@ impl Countersign {
                 "would bring today's automatic spend to {}, over the daily limit {}",
                 near_str(self.auto_spent_in_window + amount.0),
                 near_str(self.policy.daily_limit.0)
+            ));
+        }
+        if amount.0 > self.spendable() {
+            hold.push(format!(
+                "amount {} exceeds spendable balance {}",
+                near_str(amount.0),
+                near_str(self.spendable())
             ));
         }
 
@@ -274,6 +328,38 @@ impl Countersign {
         self.requests.insert(id, req.clone());
         emit("payment_rejected", json!(&req));
         req
+    }
+
+    /// Reject, and report the receiver to the shared watchlist with this request as evidence.
+    #[payable]
+    pub fn reject_and_report(&mut self, id: u64, note: Option<String>) -> PaymentRequest {
+        let watchlist = self
+            .watchlist
+            .clone()
+            .unwrap_or_else(|| env::panic_str("no watchlist set"));
+        let req = self.reject(id, note);
+        emit(
+            "reported_to_watchlist",
+            json!({"watchlist": watchlist, "request_id": id, "receiver": req.receiver}),
+        );
+        ext_watchlist::ext(watchlist)
+            .with_static_gas(WATCHLIST_REPORT_GAS)
+            .report(
+                req.receiver.clone(),
+                id,
+                req.amount,
+                req.reason.clone(),
+                req.notes.last().cloned().unwrap_or_default(),
+            )
+            .detach();
+        req
+    }
+
+    #[payable]
+    pub fn set_watchlist(&mut self, watchlist: Option<AccountId>) {
+        self.assert_owner();
+        self.watchlist = watchlist;
+        emit("watchlist_set", json!({"watchlist": self.watchlist}));
     }
 
     #[payable]
@@ -336,6 +422,45 @@ impl Countersign {
     }
 
     // ---------------------------------------------------------------- callbacks
+
+    #[private]
+    pub fn on_watchlist(
+        &mut self,
+        id: u64,
+        #[callback_result] check: Result<WatchlistCheck, PromiseError>,
+    ) -> PaymentRequest {
+        let mut req = self
+            .requests
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("no such request"));
+        if req.status != Status::Pending {
+            return req; // the owner decided while the check was in flight
+        }
+        self.roll_window();
+        match check {
+            Ok(c) if c.flagged => {
+                req.status = Status::Blocked;
+                req.notes = vec![format!(
+                    "{} is flagged on the shared watchlist: {} wallets reported it (threshold {})",
+                    req.receiver, c.reports, c.threshold
+                )];
+                req.decided_at_ns = Some(env::block_timestamp());
+                self.requests.insert(id, req.clone());
+                emit("payment_blocked", json!(&req));
+                req
+            }
+            Ok(c) if c.reports > 0 => {
+                let note = format!(
+                    "{} was reported by {} wallet(s) on the shared watchlist (flagged at {})",
+                    req.receiver, c.reports, c.threshold
+                );
+                self.decide(req, vec![note])
+            }
+            Ok(_) => self.decide(req, vec![]),
+            Err(_) => self.decide(req, vec!["the shared watchlist did not answer".to_string()]),
+        }
+    }
 
     #[private]
     pub fn on_transfer(&mut self, id: u64, amount: U128, auto: bool) -> bool {
@@ -405,6 +530,7 @@ impl Countersign {
                 .filter(|r| r.status == Status::Pending)
                 .count() as u64,
             total_requests: self.next_id,
+            watchlist: self.watchlist.clone(),
         }
     }
 
@@ -505,6 +631,15 @@ mod tests {
         )
     }
 
+    impl Countersign {
+        fn rp(&mut self, receiver: AccountId, amount: U128, reason: String) -> PaymentRequest {
+            match self.request_payment(receiver, amount, reason) {
+                PromiseOrValue::Value(r) => r,
+                PromiseOrValue::Promise(_) => panic!("expected a decision, got a watchlist check"),
+            }
+        }
+    }
+
     fn as_agent() {
         testing_env!(ctx(accounts(1), 0).build());
     }
@@ -513,7 +648,7 @@ mod tests {
     fn allowlisted_small_payment_is_auto_paid() {
         let mut w = wallet();
         as_agent();
-        let r = w.request_payment(accounts(2), U128(NEAR / 10), "compute".into());
+        let r = w.rp(accounts(2), U128(NEAR / 10), "compute".into());
         assert_eq!(r.status, Status::AutoPaid);
         assert_eq!(w.get_status().auto_spent_today.0, NEAR / 10);
     }
@@ -522,7 +657,7 @@ mod tests {
     fn unknown_receiver_waits_for_owner() {
         let mut w = wallet();
         as_agent();
-        let r = w.request_payment(accounts(4), U128(NEAR / 10), "license fee".into());
+        let r = w.rp(accounts(4), U128(NEAR / 10), "license fee".into());
         assert_eq!(r.status, Status::Pending);
         assert!(r.notes[0].contains("not on the allowlist"));
     }
@@ -531,7 +666,7 @@ mod tests {
     fn blocklisted_receiver_is_blocked() {
         let mut w = wallet();
         as_agent();
-        let r = w.request_payment(accounts(3), U128(1), "x".into());
+        let r = w.rp(accounts(3), U128(1), "x".into());
         assert_eq!(r.status, Status::Blocked);
     }
 
@@ -540,18 +675,18 @@ mod tests {
         let mut w = wallet();
         as_agent();
         assert_eq!(
-            w.request_payment(accounts(2), U128(NEAR * 6 / 10), "big".into()).status,
+            w.rp(accounts(2), U128(NEAR * 6 / 10), "big".into()).status,
             Status::Pending
         );
         assert_eq!(
-            w.request_payment(accounts(2), U128(NEAR / 2), "a".into()).status,
+            w.rp(accounts(2), U128(NEAR / 2), "a".into()).status,
             Status::AutoPaid
         );
         assert_eq!(
-            w.request_payment(accounts(2), U128(NEAR / 2), "b".into()).status,
+            w.rp(accounts(2), U128(NEAR / 2), "b".into()).status,
             Status::AutoPaid
         );
-        let third = w.request_payment(accounts(2), U128(1), "c".into());
+        let third = w.rp(accounts(2), U128(1), "c".into());
         assert_eq!(third.status, Status::Pending);
         assert!(third.notes.iter().any(|n| n.contains("daily limit")));
     }
@@ -563,7 +698,7 @@ mod tests {
         w.set_paused(true);
         as_agent();
         assert_eq!(
-            w.request_payment(accounts(2), U128(1), "x".into()).status,
+            w.rp(accounts(2), U128(1), "x".into()).status,
             Status::Blocked
         );
     }
@@ -573,7 +708,7 @@ mod tests {
     fn strangers_cannot_request() {
         let mut w = wallet();
         testing_env!(ctx(accounts(4), 0).build());
-        w.request_payment(accounts(2), U128(1), "x".into());
+        w.rp(accounts(2), U128(1), "x".into());
     }
 
     #[test]
@@ -581,7 +716,7 @@ mod tests {
     fn agent_cannot_approve() {
         let mut w = wallet();
         as_agent();
-        w.request_payment(accounts(4), U128(1), "x".into());
+        w.rp(accounts(4), U128(1), "x".into());
         testing_env!(ctx(accounts(1), 1).build());
         w.approve(0, None);
     }
@@ -591,7 +726,7 @@ mod tests {
     fn owner_needs_full_access_key() {
         let mut w = wallet();
         as_agent();
-        w.request_payment(accounts(4), U128(1), "x".into());
+        w.rp(accounts(4), U128(1), "x".into());
         testing_env!(ctx(accounts(0), 0).build());
         w.approve(0, None);
     }
@@ -600,7 +735,7 @@ mod tests {
     fn owner_approves_pending() {
         let mut w = wallet();
         as_agent();
-        w.request_payment(accounts(4), U128(NEAR / 10), "x".into());
+        w.rp(accounts(4), U128(NEAR / 10), "x".into());
         testing_env!(ctx(accounts(0), 1).build());
         let r = w.approve(0, Some("ok".into()));
         assert_eq!(r.status, Status::Approved);
@@ -619,7 +754,63 @@ mod tests {
     fn long_reason_is_trimmed_on_char_boundary() {
         let mut w = wallet();
         as_agent();
-        let r = w.request_payment(accounts(2), U128(1), "가".repeat(200));
+        let r = w.rp(accounts(2), U128(1), "가".repeat(200));
         assert!(r.reason.len() <= MAX_REASON_LEN);
+    }
+
+    #[test]
+    fn with_watchlist_the_decision_waits_for_the_check() {
+        let mut w = wallet();
+        testing_env!(ctx(accounts(0), 1).build());
+        w.set_watchlist(Some("watchlist.near".parse().unwrap()));
+        as_agent();
+        assert!(matches!(
+            w.request_payment(accounts(2), U128(1), "x".into()),
+            PromiseOrValue::Promise(_)
+        ));
+        // blocklist still answers at once, without asking the watchlist
+        assert_eq!(w.rp(accounts(3), U128(1), "x".into()).status, Status::Blocked);
+    }
+
+    fn after_check(w: &mut Countersign, id: u64, reports: u32, flagged: bool) -> PaymentRequest {
+        testing_env!(ctx("wallet.near".parse().unwrap(), 0).build());
+        w.on_watchlist(id, Ok(WatchlistCheck { reports, threshold: 2, flagged }))
+    }
+
+    #[test]
+    fn flagged_receiver_is_blocked_even_if_allowlisted() {
+        let mut w = wallet();
+        testing_env!(ctx(accounts(0), 1).build());
+        w.set_watchlist(Some("watchlist.near".parse().unwrap()));
+        as_agent();
+        let _ = w.request_payment(accounts(2), U128(1), "compute".into());
+        let r = after_check(&mut w, 0, 2, true);
+        assert_eq!(r.status, Status::Blocked);
+        assert!(r.notes[0].contains("flagged on the shared watchlist"));
+    }
+
+    #[test]
+    fn reported_receiver_is_held_even_if_allowlisted() {
+        let mut w = wallet();
+        testing_env!(ctx(accounts(0), 1).build());
+        w.set_watchlist(Some("watchlist.near".parse().unwrap()));
+        as_agent();
+        let _ = w.request_payment(accounts(2), U128(1), "compute".into());
+        let r = after_check(&mut w, 0, 1, false);
+        assert_eq!(r.status, Status::Pending);
+        assert!(r.notes[0].contains("reported by 1 wallet"));
+        as_agent();
+        let _ = w.request_payment(accounts(2), U128(1), "compute".into());
+        assert_eq!(after_check(&mut w, 1, 0, false).status, Status::AutoPaid);
+    }
+
+    #[test]
+    #[should_panic(expected = "no watchlist set")]
+    fn report_needs_a_watchlist() {
+        let mut w = wallet();
+        as_agent();
+        w.rp(accounts(4), U128(1), "x".into());
+        testing_env!(ctx(accounts(0), 1).build());
+        w.reject_and_report(0, None);
     }
 }
