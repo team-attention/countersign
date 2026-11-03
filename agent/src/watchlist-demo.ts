@@ -5,12 +5,13 @@
 // third wallet blocks it outright even though that owner had the receiver on its allowlist.
 //
 //   bun run watchlist
+//   bun --env-file=../.env.watchlist run watchlist --testnet   (FUNDER_ID / FUNDER_KEY: a testnet account with ~12 NEAR)
 import { Account, JsonRpcProvider, KeyPair, type KeyPairString } from "near-api-js";
 import { DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY, Sandbox } from "near-sandbox";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { printDecision, type PaymentRequest } from "./agent";
-import { GAS, ROOT, color, fmt, near, returnValue, step, why } from "./near";
+import { GAS, ROOT, STATE_DIR, color, fmt, near, returnValue, step, why } from "./near";
 
 const THRESHOLD = 2;
 const WASM = {
@@ -18,35 +19,52 @@ const WASM = {
   watchlist: readFileSync(join(ROOT, "contracts", "out", "watchlist.wasm")),
 };
 
+const TESTNET = process.argv.includes("--testnet");
+if (TESTNET && !process.env.FUNDER_ID?.endsWith(".testnet")) throw new Error("--testnet needs FUNDER_ID ending in .testnet and FUNDER_KEY");
+const RPC = "https://test.rpc.fastnear.com";
+const FUNDER_ID = TESTNET ? process.env.FUNDER_ID! : DEFAULT_ACCOUNT_ID;
+const TAG = TESTNET ? `-${Date.now().toString(36).slice(-4)}` : ""; // fresh names on every testnet run
+
 const t0 = Date.now();
-const sb = await Sandbox.start({});
+const sb = TESTNET ? undefined : await Sandbox.start({});
+const created: Record<string, { id: string; key: string }> = {};
 try {
-  const prov = new JsonRpcProvider({ url: sb.rpcUrl });
-  const funder = new Account(DEFAULT_ACCOUNT_ID, prov, DEFAULT_PRIVATE_KEY as KeyPairString);
+  const prov = new JsonRpcProvider({ url: sb?.rpcUrl ?? RPC });
+  const funder = new Account(FUNDER_ID, prov, (TESTNET ? process.env.FUNDER_KEY : DEFAULT_PRIVATE_KEY) as KeyPairString);
   const view = async <T>(contractId: string, method: string, args: Record<string, unknown> = {}) =>
     (await prov.callFunction({ contractId, method, args })) as T;
   const create = async (name: string, amount: string) => {
     const kp = KeyPair.fromRandom("ed25519");
-    const id = `${name}.${DEFAULT_ACCOUNT_ID}`;
+    const id = `${name}${TAG}.${FUNDER_ID}`;
     await funder.createAccount({ newAccountId: id, publicKey: kp.getPublicKey().toString(), nearToTransfer: BigInt(near(amount)) });
+    // testnet RPC nodes can lag a block or two behind the one that created the key
+    for (let i = 0; TESTNET && i < 20; i++) {
+      try {
+        await prov.viewAccessKey({ accountId: id, publicKey: kp.getPublicKey() });
+        break;
+      } catch {
+        await Bun.sleep(1000);
+      }
+    }
+    created[name] = { id, key: kp.toString() };
     return new Account(id, prov, kp.toString() as KeyPairString);
   };
 
   step("deploy the shared watchlist");
-  const curator = await create("curator", "0.5");
-  const watchlist = await create("watchlist", "3");
+  const curator = await create("curator", "0.2");
+  const watchlist = await create("watchlist", "1.8");
   await watchlist.deployContract(WASM.watchlist);
   await watchlist.callFunction({ contractId: watchlist.accountId, methodName: "new", args: { curator: curator.accountId, threshold: THRESHOLD }, gas: GAS });
   console.log(`  ${watchlist.accountId}: a receiver is flagged once ${THRESHOLD} different wallets reported it`);
 
-  const compute = await create("compute", "0.05");
-  const invoiceDesk = await create("invoice-desk", "0.05"); // where the injected "invoice" asks to be paid
-  const stranger = await create("stranger", "0.5");
+  const compute = await create("compute", "0.02");
+  const invoiceDesk = await create("invoice-desk", "0.02"); // where the injected "invoice" asks to be paid
+  const stranger = await create("stranger", "0.3");
 
   step("three wallets, three owners; each joins the watchlist");
   const wallets: { name: string; owner: Account; agent: Account }[] = [];
   for (const name of ["a", "b", "c"]) {
-    const owner = await create(`owner-${name}`, "0.5");
+    const owner = await create(`owner-${name}`, "0.2");
     const wallet = await create(`wallet-${name}`, "3");
     await wallet.deployContract(WASM.countersign);
     // Wallet c's owner trusted invoice-desk before it started sending injected invoices.
@@ -81,6 +99,7 @@ try {
   const rejectAndReport = async (w: (typeof wallets)[number], id: number, note: string) => {
     const tx = await w.owner.callFunctionRaw({ contractId: w.agent.accountId, methodName: "reject_and_report", args: { id, note }, deposit: 1n, gas: GAS });
     printDecision(returnValue<PaymentRequest>(tx)!);
+    if (TESTNET) await Bun.sleep(2000); // let the RPC node catch up with the cross-contract report
     const c = await view<any>(watchlist.accountId, "check", { receiver: invoiceDesk.accountId });
     console.log(`  watchlist: ${c.receiver} reports ${c.reports}/${c.threshold} ${c.flagged ? color.red("FLAGGED") : ""}`);
   };
@@ -133,6 +152,9 @@ try {
   console.log(`  wallet b held the reported invoice: ${results.b}; wallet c blocked the flagged one: ${results.c}; compute: ${results.compute}; after appeal: ${results.afterClear}`);
   console.log(ok ? color.green(`\ndone in ${((Date.now() - t0) / 1000).toFixed(0)}s`) : color.red("\nunexpected result"));
   if (!ok) process.exitCode = 1;
+  if (TESTNET) console.log(`\n  explorer: https://testnet.nearblocks.io/address/${watchlist.accountId}`);
 } finally {
-  await sb.tearDown();
+  // gitignored; testnet keys only, so the run can be inspected or cleaned up later
+  if (TESTNET) writeFileSync(join(STATE_DIR, `watchlist-testnet${TAG}.json`), JSON.stringify({ rpcUrl: RPC, accounts: created }, null, 2), { mode: 0o600 });
+  await sb?.tearDown();
 }

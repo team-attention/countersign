@@ -89,6 +89,17 @@ The same run, deployed on testnet on 2026-10-30 (bounty earned, injected fee rej
 - Ledger: [live page](https://countersign.bongbonggg97.workers.dev/ledger?rpc=https://test.rpc.fastnear.com&wallet=agent-wallet-5pyn1.countersign-15434.testnet) (or `bun run web` and paste the wallet id)
 - Read it yourself: `near contract call-function as-read-only agent-wallet-5pyn1.countersign-15434.testnet list_requests json-args '{}' network-config testnet now`
 
+### Shared watchlist on testnet (2026-11-03)
+
+`bun run watchlist --testnet` ran the watchlist demo above on testnet in 107 seconds, same result: wallet B held the reported invoice, wallet C blocked it despite its allowlist, the curator's appeal let it through again.
+
+- Watchlist: [`watchlist-tai7.countersign-wl-l6x7np.testnet`](https://testnet.nearblocks.io/address/watchlist-tai7.countersign-wl-l6x7np.testnet) — `check` and `get_reports` are views anyone can call
+- Wallets: [`wallet-a-tai7.countersign-wl-l6x7np.testnet`](https://testnet.nearblocks.io/address/wallet-a-tai7.countersign-wl-l6x7np.testnet), [`wallet-b-tai7.countersign-wl-l6x7np.testnet`](https://testnet.nearblocks.io/address/wallet-b-tai7.countersign-wl-l6x7np.testnet), [`wallet-c-tai7.countersign-wl-l6x7np.testnet`](https://testnet.nearblocks.io/address/wallet-c-tai7.countersign-wl-l6x7np.testnet) (each has a single function-call key for the agent, no full-access key)
+- Read it yourself: `near contract call-function as-read-only wallet-c-tai7.countersign-wl-l6x7np.testnet list_requests json-args '{}' network-config testnet now` shows `#0 Blocked`, `#1 AutoPaid` (compute), `#2 AutoPaid` (after the appeal)
+- Non-member `report` and non-curator `clear` were refused by the contract (`only member wallets can report`, `only the curator can do this`).
+
+To run it yourself you need a testnet account with about 12 NEAR (three wallets hold ~2.2 NEAR of contract storage each): `cd agent && bun --env-file=../.env.watchlist run watchlist --testnet` with `FUNDER_ID` / `FUNDER_KEY` in that file. Keys of the accounts it creates go to `.state/` (gitignored).
+
 ## How it works
 
 ```
@@ -133,7 +144,7 @@ The same run, deployed on testnet on 2026-10-30 (bounty earned, injected fee rej
 - Testnet and local sandbox only. Nothing here touches mainnet.
 - The client's hidden tests ship in this repo (`client/hidden-tests/`) so judges can run them; the agent's scratch copy never contains them.
 - The patch itself is passed locally (`.state/bounty-<id>.patch`); only its sha256 goes on chain.
-- The watchlist has a single curator who admits member wallets and handles appeals. Two colluding members could flag an honest receiver until the curator clears it; the threshold and membership are the defense, not cryptography. It runs in the local sandbox only so far.
+- The watchlist has a single curator who admits member wallets and handles appeals. Two colluding members could flag an honest receiver until the curator clears it; the threshold and membership are the defense, not cryptography. It has run once on testnet (2026-11-03); the curator is a demo account.
 - With a watchlist set, `request_payment` returns after a cross-contract call (about one extra block).
 - No NEAR Intents: payments are native NEAR transfers. Intents have no testnet (HACKATHON.md Q-007).
 

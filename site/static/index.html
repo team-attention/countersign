@@ -81,9 +81,10 @@ cd countersign/agent &amp;&amp; bun install &amp;&amp; bun run demo</pre>
   </ol>
   <pre>cd countersign/agent &amp;&amp; bun run watchlist</pre>
   <p class="dim">About 20 seconds on a local node: 3 wallets, 3 owners, 1 watchlist. Each report can be checked with <code>get_request</code> on the wallet that filed it.</p>
+  <p><b>On testnet (2026-11-03):</b> the same run took 107 seconds with the same result. Watchlist contract <a href="https://testnet.nearblocks.io/address/watchlist-tai7.countersign-wl-l6x7np.testnet"><code>watchlist-tai7.countersign-wl-l6x7np.testnet</code></a>; wallet C's ledger: <a href="/ledger?rpc=https://test.rpc.fastnear.com&amp;wallet=wallet-c-tai7.countersign-wl-l6x7np.testnet">#0 blocked, #1 compute auto-paid, #2 paid after the appeal</a>. A non-member report and a non-curator clear were refused by the contract.</p>
 
   <h2>Limits</h2>
-  <p class="dim">Testnet and local sandbox only. The wallet has no full-access key after setup, so the contract cannot be upgraded. The watchlist has one curator who adds member wallets and handles appeals; it is not yet run on testnet. Built for NEAR HACKATHON (Nov 2026), tracks: AI Security &amp; Defense, Agent Economy. Code written with Claude Code; see the build log in the repo.</p>
+  <p class="dim">Testnet and local sandbox only. The wallet has no full-access key after setup, so the contract cannot be upgraded. The watchlist has one curator who adds member wallets and handles appeals; it has run once on testnet. Built for NEAR HACKATHON (Nov 2026), tracks: AI Security &amp; Defense, Agent Economy. Code written with Claude Code; see the build log in the repo.</p>
 </main>
 <script>
 // Cookie-free counter: sends only the event name. No identifiers are stored.
