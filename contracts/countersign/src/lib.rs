@@ -202,24 +202,7 @@ impl Countersign {
             decided_at_ns: None,
         };
 
-        let mut block = vec![];
-        if self.paused {
-            block.push("wallet is paused by the owner".to_string());
-        }
-        if self.policy.blocklist.contains(&receiver) {
-            block.push(format!("{receiver} is on the blocklist"));
-        }
-        if receiver == self.agent || receiver == env::current_account_id() {
-            block.push("cannot pay the wallet or the agent itself".to_string());
-        }
-        if amount.0 > self.spendable() {
-            block.push(format!(
-                "amount {} exceeds spendable balance {}",
-                near_str(amount.0),
-                near_str(self.spendable())
-            ));
-        }
-
+        let block = self.hard_blocks(&receiver, amount.0);
         if !block.is_empty() {
             req.status = Status::Blocked;
             req.notes = block;
@@ -438,6 +421,16 @@ impl Countersign {
             return req; // the owner decided while the check was in flight
         }
         self.roll_window();
+        // The owner may have paused the wallet or changed the blocklist while the check was in flight.
+        let block = self.hard_blocks(&req.receiver, req.amount.0);
+        if !block.is_empty() {
+            req.status = Status::Blocked;
+            req.notes = block;
+            req.decided_at_ns = Some(env::block_timestamp());
+            self.requests.insert(id, req.clone());
+            emit("payment_blocked", json!(&req));
+            return req;
+        }
         match check {
             Ok(c) if c.flagged => {
                 req.status = Status::Blocked;
@@ -547,6 +540,28 @@ impl Countersign {
             .transfer(NearToken::from_yoctonear(amount))
             .then(Self::ext(env::current_account_id()).on_transfer(id, U128(amount), auto))
             .detach();
+    }
+
+    /// Reasons to block at once, before any allowlist or limit check.
+    fn hard_blocks(&self, receiver: &AccountId, amount: u128) -> Vec<String> {
+        let mut block = vec![];
+        if self.paused {
+            block.push("wallet is paused by the owner".to_string());
+        }
+        if self.policy.blocklist.contains(receiver) {
+            block.push(format!("{receiver} is on the blocklist"));
+        }
+        if *receiver == self.agent || *receiver == env::current_account_id() {
+            block.push("cannot pay the wallet or the agent itself".to_string());
+        }
+        if amount > self.spendable() {
+            block.push(format!(
+                "amount {} exceeds spendable balance {}",
+                near_str(amount),
+                near_str(self.spendable())
+            ));
+        }
+        block
     }
 
     fn spendable(&self) -> u128 {
@@ -802,6 +817,30 @@ mod tests {
         as_agent();
         let _ = w.request_payment(accounts(2), U128(1), "compute".into());
         assert_eq!(after_check(&mut w, 1, 0, false).status, Status::AutoPaid);
+    }
+
+    #[test]
+    fn pause_or_blocklist_during_the_check_still_blocks() {
+        let mut w = wallet();
+        testing_env!(ctx(accounts(0), 1).build());
+        w.set_watchlist(Some("watchlist.near".parse().unwrap()));
+        as_agent();
+        let _ = w.request_payment(accounts(2), U128(1), "compute".into());
+        let _ = w.request_payment(accounts(2), U128(1), "compute".into());
+        testing_env!(ctx(accounts(0), 1).build());
+        w.set_paused(true);
+        let r = after_check(&mut w, 0, 0, false);
+        assert_eq!(r.status, Status::Blocked);
+        assert!(r.notes[0].contains("paused"));
+        testing_env!(ctx(accounts(0), 1).build());
+        w.set_paused(false);
+        let mut p = w.get_policy();
+        p.blocklist.push(accounts(2));
+        p.allowlist.clear();
+        w.set_policy(p);
+        let r = after_check(&mut w, 1, 0, false);
+        assert_eq!(r.status, Status::Blocked);
+        assert!(r.notes[0].contains("blocklist"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ Built for NEAR HACKATHON (Nov 1–14, 2026). Tracks: AI Security & Defense, Agen
 
 - Site: https://countersign.bongbonggg97.workers.dev (landing, live testnet ledger, recorded run)
 - Sibling project by the same team: [Proof of Done](https://github.com/team-attention/proof-of-done), a bounty arena where agents stake NEAR on "it's done" and false claims are slashed. (HACKATHON.md allows two projects per person and asks each README to name the other.)
-- Hackathon window: commits up to tag `pre-hackathon` were made on 2026-10-30/31, after the 2026-10-19 announcement and before the window opened. Work done during the window: [`pre-hackathon...main`](https://github.com/team-attention/countersign/compare/pre-hackathon...main).
+- Hackathon window: commits up to tag `pre-hackathon` were made on 2026-10-30/31, after the 2026-10-19 announcement and before the window opened. Work done during the window: [`pre-hackathon...main`](https://github.com/team-attention/countersign/compare/pre-hackathon...main). The first three commits in that range (site, README, wasm path cleanup) are dated 2026-10-31 UTC, a few hours before the window; treat them as baseline if you count by UTC. The main new feature in the window is the shared watchlist (`contracts/watchlist`, `agent/src/watchlist-demo.ts`).
 
 ## The problem
 
@@ -18,7 +18,7 @@ An agent that earns and spends money needs a wallet. If it holds a full-access k
 
 Requirements: [Bun](https://bun.sh) 1.2+ on macOS or Linux. The contracts are prebuilt in `contracts/out/`; Rust is only needed to rebuild them (after `cargo near build`, copy the wasm into `contracts/out/` and run `python3 contracts/scrub-paths.py contracts/out/*.wasm` to replace local build paths).
 
-On macOS the `near-sandbox` binary links Homebrew's liblzma. If the demo stops with `Binary doesn't respond, probably is corrupted`, run `brew install xz` and try again.
+On macOS the `near-sandbox` binary links Homebrew's liblzma. If the demo stops with `Binary doesn't respond, probably is corrupted`, run `brew install xz` and try again. Without Homebrew, point `DYLD_LIBRARY_PATH` at any directory that has `liblzma.5.dylib` (for example the `.dylibs` folder inside a Pillow install) and run the script with Bun directly: `DYLD_LIBRARY_PATH=<dir> bun src/demo.ts`. `bun run demo` drops that variable on macOS (System Integrity Protection), so call `bun src/...` instead.
 
 1. `cd agent && bun install`
 2. `bun run demo`
@@ -26,7 +26,7 @@ On macOS the `near-sandbox` binary links Homebrew's liblzma. If the demo stops w
    - **Setup**: the wallet ends with only two function-call keys. The line `FULL ACCESS` must not appear under "wallet deletes its own full-access key".
    - **Earn**: the agent takes bounty #0 (1 NEAR), pays the allowlisted `compute` vendor 0.05 NEAR → `AUTO-PAID`.
    - **Prompt injection**: the task README hides an instruction to pay a "contributor license fee". The agent requests 0.5 NEAR to `license-fee` → `PENDING` with three reasons (not allowlisted, over per-payment limit, over daily limit).
-   - **Client check**: the client applies the patch, confirms it matches the on-chain hash, runs hidden tests (`6 pass, 0 fail`) and pays 1 NEAR into the agent's wallet.
+   - **Client check**: the client applies the patch, confirms the sha256 of the patched `src/split.ts` matches the on-chain hash, runs the task's 2 visible tests plus 4 hidden ones (`6 pass, 0 fail`) and pays 1 NEAR into the agent's wallet.
    - **Owner**: rejects the injected fee.
    - **Attacks** with the agent's own keys, each `refused`: direct transfer (`Access key requires full access`), calling `approve` (`Access key does not allow method approve`), `set_policy` with deposit (`Deposit is not allowed with function call`), adding a full-access key, using the board key on the wallet (receiver mismatch).
    - **Through the only door**: paying the blocklisted `scammer` → `BLOCKED`; 3 NEAR to an unknown account → `PENDING`; six 0.1 NEAR compute top-ups → four `AUTO-PAID`, then `PENDING` once the 0.5 NEAR daily cap is reached.
@@ -47,9 +47,10 @@ On macOS the `near-sandbox` binary links Homebrew's liblzma. If the demo stops w
 Run the contract unit tests (needs Rust and [`cargo-near`](https://github.com/near/cargo-near)):
 
 ```bash
-cd contracts/countersign && cargo test
-cd contracts/bounty-board && cargo test
-cd contracts/watchlist && cargo test
+# from the repository root
+(cd contracts/countersign && cargo test)   # 16 tests
+(cd contracts/bounty-board && cargo test)  # 3 tests
+(cd contracts/watchlist && cargo test)     # 5 tests
 ```
 
 ### Step by step on a local node
@@ -143,9 +144,13 @@ To run it yourself you need a testnet account with about 12 NEAR (three wallets 
 
 - Testnet and local sandbox only. Nothing here touches mainnet.
 - The client's hidden tests ship in this repo (`client/hidden-tests/`) so judges can run them; the agent's scratch copy never contains them.
-- The patch itself is passed locally (`.state/bounty-<id>.patch`); only its sha256 goes on chain.
+- The patch itself is passed locally (`.state/bounty-<id>.patch`); only a sha256 goes on chain, and it covers the patched `src/split.ts`, not the whole tree.
+- The key isolation is on chain, not on the host. In the demo the owner, client and agent keys sit in the same `.state/` folder on one machine, and the client runs submitted code with `bun test` without a sandbox. A real deployment keeps the owner key on another machine and runs untrusted patches in a container.
+- `submit_work` lets the agent's board key name any `payout_to`, and the client does not check it. The demo agent names its own wallet; a compromised agent could name another account and the bounty reward would skip the wallet policy. A fix is to fix `payout_to` when the bounty is taken, or have the client reject other destinations.
+- Bounty-board payouts and refunds are fire-and-forget transfers with no failure callback.
+- The watchlist stores the reporting wallet and request id as evidence but does not verify them on chain; the demo reads them back with `get_request`. The watchlist demo also keeps the watchlist account's full-access key (it is the curator account).
 - The watchlist has a single curator who admits member wallets and handles appeals. Two colluding members could flag an honest receiver until the curator clears it; the threshold and membership are the defense, not cryptography. It has run once on testnet (2026-11-03); the curator is a demo account.
-- With a watchlist set, `request_payment` returns after a cross-contract call (about one extra block).
+- With a watchlist set, `request_payment` returns after a cross-contract call (about one extra block). The callback re-checks pause, blocklist and balance, so a pause or blocklist change made while the check is in flight still wins (unit test `pause_or_blocklist_during_the_check_still_blocks`).
 - No NEAR Intents: payments are native NEAR transfers. Intents have no testnet (HACKATHON.md Q-007).
 
 ## Built with
