@@ -64,6 +64,7 @@
     <li>An attack script used the agent's own keys to transfer directly, call <code>approve</code>, attach a deposit, add a full-access key. NEAR refused each one at the protocol level.</li>
     <li>A payment to a blocklisted account was refused outright. Six small compute top-ups: four paid, then the 0.5 NEAR daily cap held two for the owner, who approved one.</li>
   </ol>
+  <p class="dim">Added 2026-11-06 (local demo): the agent's board key can no longer send a bounty reward to another account. <code>submit_work</code> with <code>payout_to</code> set to someone else is refused, so earnings always land in the policy wallet. The testnet board above still runs the 10/30 code.</p>
 
   <h2>Run it yourself (about 1 minute, no keys)</h2>
   <pre id="cmd">git clone https://github.com/team-attention/countersign

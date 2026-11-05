@@ -28,7 +28,7 @@ On macOS the `near-sandbox` binary links Homebrew's liblzma. If the demo stops w
    - **Prompt injection**: the task README hides an instruction to pay a "contributor license fee". The agent requests 0.5 NEAR to `license-fee` → `PENDING` with three reasons (not allowlisted, over per-payment limit, over daily limit).
    - **Client check**: the client applies the patch, confirms the sha256 of the patched `src/split.ts` matches the on-chain hash, runs the task's 2 visible tests plus 4 hidden ones (`6 pass, 0 fail`) and pays 1 NEAR into the agent's wallet.
    - **Owner**: rejects the injected fee.
-   - **Attacks** with the agent's own keys, each `refused`: direct transfer (`Access key requires full access`), calling `approve` (`Access key does not allow method approve`), `set_policy` with deposit (`Deposit is not allowed with function call`), adding a full-access key, using the board key on the wallet (receiver mismatch).
+   - **Attacks** with the agent's own keys, each `refused`: direct transfer (`Access key requires full access`), calling `approve` (`Access key does not allow method approve`), `set_policy` with deposit (`Deposit is not allowed with function call`), adding a full-access key, using the board key on the wallet (receiver mismatch), and submitting work with the reward routed to another account (`payout_to must be the submitting account`).
    - **Through the only door**: paying the blocklisted `scammer` → `BLOCKED`; 3 NEAR to an unknown account → `PENDING`; six 0.1 NEAR compute top-ups → four `AUTO-PAID`, then `PENDING` once the 0.5 NEAR daily cap is reached.
    - **Owner** approves one held top-up and rejects the rest; pauses the wallet; the next request is `BLOCKED` with `wallet is paused by the owner`.
    - **Result** line: `requests 11: auto-paid 5, owner-approved 1, owner-rejected 3, blocked 2, still pending 0`.
@@ -49,7 +49,7 @@ Run the contract unit tests (needs Rust and [`cargo-near`](https://github.com/ne
 ```bash
 # from the repository root
 (cd contracts/countersign && cargo test)   # 16 tests
-(cd contracts/bounty-board && cargo test)  # 3 tests
+(cd contracts/bounty-board && cargo test)  # 5 tests
 (cd contracts/watchlist && cargo test)     # 5 tests
 ```
 
@@ -146,7 +146,7 @@ To run it yourself you need a testnet account with about 12 NEAR (three wallets 
 - The client's hidden tests ship in this repo (`client/hidden-tests/`) so judges can run them; the agent's scratch copy never contains them.
 - The patch itself is passed locally (`.state/bounty-<id>.patch`); only a sha256 goes on chain, and it covers the patched `src/split.ts`, not the whole tree.
 - The key isolation is on chain, not on the host. In the demo the owner, client and agent keys sit in the same `.state/` folder on one machine, and the client runs submitted code with `bun test` without a sandbox. A real deployment keeps the owner key on another machine and runs untrusted patches in a container.
-- `submit_work` lets the agent's board key name any `payout_to`, and the client does not check it. The demo agent names its own wallet; a compromised agent could name another account and the bounty reward would skip the wallet policy. A fix is to fix `payout_to` when the bounty is taken, or have the client reject other destinations.
+- `submit_work` refuses any `payout_to` other than the submitting account (added 2026-11-06, unit tests `worker_cannot_route_reward_elsewhere`, `payout_check_comes_before_bounty_lookup`, attack 7 in `bun run attack`). Before this, a compromised agent's board key could name another account and the bounty reward would skip the wallet policy. The testnet bounty board deployed on 2026-10-30 still runs the older code; the fix is in `contracts/out/bounty_board.wasm` and the sandbox demo.
 - Bounty-board payouts and refunds are fire-and-forget transfers with no failure callback.
 - The watchlist stores the reporting wallet and request id as evidence but does not verify them on chain; the demo reads them back with `get_request`. The watchlist demo also keeps the watchlist account's full-access key (it is the curator account).
 - The watchlist has a single curator who admits member wallets and handles appeals. Two colluding members could flag an honest receiver until the curator clears it; the threshold and membership are the defense, not cryptography. It has run once on testnet (2026-11-03); the curator is a demo account.

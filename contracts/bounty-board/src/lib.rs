@@ -90,9 +90,15 @@ impl BountyBoard {
         b
     }
 
-    /// Callable with a function-call key (no deposit). The caller is the worker;
-    /// `payout_to` receives the reward if accepted.
+    /// Callable with a function-call key (no deposit). The caller is the worker and
+    /// `payout_to` must be the caller: a worker key cannot route the reward elsewhere
+    /// (for the demo the caller is the agent's Countersign wallet, so earnings stay under
+    /// its spending policy). Checked before the bounty lookup.
     pub fn submit_work(&mut self, id: u64, payout_to: AccountId, submission: String) -> Bounty {
+        require!(
+            payout_to == env::predecessor_account_id(),
+            "payout_to must be the submitting account"
+        );
         require!(submission.len() <= 200, "submission too long");
         let mut b = self.get(id);
         require!(b.status == BountyStatus::Open, "bounty is not open");
@@ -189,11 +195,30 @@ mod tests {
         let mut c = BountyBoard::new();
         c.post_bounty("fix it".into(), "tasks/x".into());
         as_(accounts(1), NearToken::from_yoctonear(0));
-        c.submit_work(0, accounts(2), "sha256:ab".into());
+        c.submit_work(0, accounts(1), "sha256:ab".into());
         as_(accounts(0), NearToken::from_yoctonear(0));
         let b = c.accept(0, None);
         assert_eq!(b.status, BountyStatus::Paid);
-        assert_eq!(b.payout_to, Some(accounts(2)));
+        assert_eq!(b.payout_to, Some(accounts(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "payout_to must be the submitting account")]
+    fn worker_cannot_route_reward_elsewhere() {
+        as_(accounts(0), NearToken::from_near(1));
+        let mut c = BountyBoard::new();
+        c.post_bounty("fix it".into(), "tasks/x".into());
+        as_(accounts(1), NearToken::from_yoctonear(0));
+        c.submit_work(0, accounts(2), "sha256:ab".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "payout_to must be the submitting account")]
+    fn payout_check_comes_before_bounty_lookup() {
+        as_(accounts(0), NearToken::from_near(1));
+        let mut c = BountyBoard::new();
+        as_(accounts(1), NearToken::from_yoctonear(0));
+        c.submit_work(7, accounts(2), "sha256:ab".into());
     }
 
     #[test]

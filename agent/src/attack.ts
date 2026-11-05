@@ -50,6 +50,11 @@ export async function runAttack(s: DeployState) {
   for (let i = 0; i < 6; i++) {
     await attempt(`compute top-up ${i + 1}`, () => requestPayment(s, s.ids.compute, near("0.1"), "more compute"));
   }
+
+  step("attack 7: route the next bounty reward around the wallet");
+  await attempt("board.submit_work(payout_to = scammer)", () =>
+    work.callFunction({ contractId: s.ids.board, methodName: "submit_work", args: { id: 0, payout_to: s.ids.scammer, submission: "sha256:00" }, gas: GAS }),
+  );
 }
 
 if (import.meta.main) {
