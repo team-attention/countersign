@@ -6,7 +6,9 @@
 use near_sdk::json_types::U128;
 use near_sdk::serde_json::json;
 use near_sdk::store::IterableMap;
-use near_sdk::{AccountId, BorshStorageKey, NearToken, PanicOnDefault, Promise, env, near, require};
+use near_sdk::{
+    AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise, env, near, require,
+};
 
 #[near(serializers = [borsh])]
 #[derive(BorshStorageKey)]
@@ -48,6 +50,7 @@ pub struct BountyBoard {
 }
 
 const MAX_TEXT: usize = 1000;
+const CALLBACK_GAS: Gas = Gas::from_tgas(10);
 
 fn emit(event: &str, data: near_sdk::serde_json::Value) {
     env::log_str(&format!(
@@ -111,7 +114,9 @@ impl BountyBoard {
         b
     }
 
-    /// Client accepts the submission and the reward is paid out.
+    /// Client accepts the submission and the reward is paid out. If the transfer fails
+    /// (e.g. the payout account was deleted), `on_payout` puts the bounty back to
+    /// `Submitted` so the client can accept again or reject; the reward stays on the board.
     pub fn accept(&mut self, id: u64, note: Option<String>) -> Bounty {
         let mut b = self.get(id);
         require!(env::predecessor_account_id() == b.client, "only the client can accept");
@@ -122,6 +127,11 @@ impl BountyBoard {
         emit("bounty_paid", json!(&b));
         Promise::new(b.payout_to.clone().unwrap())
             .transfer(NearToken::from_yoctonear(b.reward.0))
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(CALLBACK_GAS)
+                    .on_payout(id, true),
+            )
             .detach();
         b
     }
@@ -141,6 +151,7 @@ impl BountyBoard {
         b
     }
 
+    /// Client takes an open bounty back. A failed refund reopens it (see `on_payout`).
     pub fn cancel(&mut self, id: u64) -> Bounty {
         let mut b = self.get(id);
         require!(env::predecessor_account_id() == b.client, "only the client can cancel");
@@ -150,8 +161,33 @@ impl BountyBoard {
         emit("bounty_cancelled", json!(&b));
         Promise::new(b.client.clone())
             .transfer(NearToken::from_yoctonear(b.reward.0))
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(CALLBACK_GAS)
+                    .on_payout(id, false),
+            )
             .detach();
         b
+    }
+
+    /// Runs after a payout (`accept`) or refund (`cancel`). On failure the NEAR is back on
+    /// the board, so the bounty returns to the state it was in before the transfer.
+    #[private]
+    pub fn on_payout(&mut self, id: u64, accepted: bool) -> bool {
+        let ok = env::promise_result_checked(0, 64).is_ok();
+        if !ok {
+            let mut b = self.get(id);
+            if accepted {
+                b.status = BountyStatus::Submitted;
+                b.notes.push("payout failed; reward back on the board".into());
+            } else {
+                b.status = BountyStatus::Open;
+                b.notes.push("refund failed; bounty reopened".into());
+            }
+            self.bounties.insert(id, b.clone());
+            emit("payout_failed", json!(&b));
+        }
+        ok
     }
 
     pub fn get_bounty(&self, id: u64) -> Option<Bounty> {
@@ -179,6 +215,7 @@ mod tests {
     use super::*;
     use near_sdk::test_utils::{VMContextBuilder, accounts};
     use near_sdk::testing_env;
+    use near_sdk::{PromiseResult, RuntimeFeesConfig, test_vm_config};
 
     fn as_(who: AccountId, deposit: NearToken) {
         testing_env!(
@@ -230,6 +267,62 @@ mod tests {
         as_(accounts(1), NearToken::from_yoctonear(0));
         c.submit_work(0, accounts(1), "sha256:ab".into());
         c.accept(0, None);
+    }
+
+    fn callback(result: PromiseResult) {
+        let ctx = VMContextBuilder::new()
+            .current_account_id(accounts(3))
+            .predecessor_account_id(accounts(3))
+            .build();
+        testing_env!(
+            ctx,
+            test_vm_config(),
+            RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![result]
+        );
+    }
+
+    fn accepted_board() -> BountyBoard {
+        as_(accounts(0), NearToken::from_near(1));
+        let mut c = BountyBoard::new();
+        c.post_bounty("fix it".into(), "tasks/x".into());
+        as_(accounts(1), NearToken::from_yoctonear(0));
+        c.submit_work(0, accounts(1), "sha256:ab".into());
+        as_(accounts(0), NearToken::from_yoctonear(0));
+        c.accept(0, None);
+        c
+    }
+
+    #[test]
+    fn failed_payout_returns_to_submitted_and_can_be_accepted_again() {
+        let mut c = accepted_board();
+        callback(PromiseResult::Failed);
+        assert!(!c.on_payout(0, true));
+        let b = c.get_bounty(0).unwrap();
+        assert_eq!(b.status, BountyStatus::Submitted);
+        assert_eq!(b.notes.last().unwrap(), "payout failed; reward back on the board");
+        as_(accounts(0), NearToken::from_yoctonear(0));
+        assert_eq!(c.accept(0, None).status, BountyStatus::Paid);
+    }
+
+    #[test]
+    fn successful_payout_stays_paid() {
+        let mut c = accepted_board();
+        callback(PromiseResult::Successful(vec![]));
+        assert!(c.on_payout(0, true));
+        assert_eq!(c.get_bounty(0).unwrap().status, BountyStatus::Paid);
+    }
+
+    #[test]
+    fn failed_refund_reopens_bounty() {
+        as_(accounts(0), NearToken::from_near(1));
+        let mut c = BountyBoard::new();
+        c.post_bounty("fix it".into(), "tasks/x".into());
+        c.cancel(0);
+        callback(PromiseResult::Failed);
+        assert!(!c.on_payout(0, false));
+        assert_eq!(c.get_bounty(0).unwrap().status, BountyStatus::Open);
     }
 
     #[test]

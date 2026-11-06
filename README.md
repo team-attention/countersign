@@ -49,7 +49,7 @@ Run the contract unit tests (needs Rust and [`cargo-near`](https://github.com/ne
 ```bash
 # from the repository root
 (cd contracts/countersign && cargo test)   # 16 tests
-(cd contracts/bounty-board && cargo test)  # 5 tests
+(cd contracts/bounty-board && cargo test)  # 8 tests
 (cd contracts/watchlist && cargo test)     # 5 tests
 ```
 
@@ -147,7 +147,7 @@ To run it yourself you need a testnet account with about 12 NEAR (three wallets 
 - The patch itself is passed locally (`.state/bounty-<id>.patch`); only a sha256 goes on chain, and it covers the patched `src/split.ts`, not the whole tree.
 - The key isolation is on chain, not on the host. In the demo the owner, client and agent keys sit in the same `.state/` folder on one machine, and the client runs submitted code with `bun test` without a sandbox. A real deployment keeps the owner key on another machine and runs untrusted patches in a container.
 - `submit_work` refuses any `payout_to` other than the submitting account (added 2026-11-06, unit tests `worker_cannot_route_reward_elsewhere`, `payout_check_comes_before_bounty_lookup`, attack 7 in `bun run attack`). Before this, a compromised agent's board key could name another account and the bounty reward would skip the wallet policy. The testnet bounty board deployed on 2026-10-30 still runs the older code; the fix is in `contracts/out/bounty_board.wasm` and the sandbox demo.
-- Bounty-board payouts and refunds are fire-and-forget transfers with no failure callback.
+- Bounty-board payouts and refunds have a failure callback (added 2026-11-06, `on_payout`): if the transfer fails, the NEAR is back on the board and the bounty returns to `Submitted` (the client can accept again or reject) or, for a refund, to `Open`. Unit tests `failed_payout_returns_to_submitted_and_can_be_accepted_again`, `successful_payout_stays_paid`, `failed_refund_reopens_bounty`; the failure path is not exercised in the sandbox demo. Like the `payout_to` fix, it is not on the 10/30 testnet board.
 - The watchlist stores the reporting wallet and request id as evidence but does not verify them on chain; the demo reads them back with `get_request`. The watchlist demo also keeps the watchlist account's full-access key (it is the curator account).
 - The watchlist has a single curator who admits member wallets and handles appeals. Two colluding members could flag an honest receiver until the curator clears it; the threshold and membership are the defense, not cryptography. It has run once on testnet (2026-11-03); the curator is a demo account.
 - With a watchlist set, `request_payment` returns after a cross-contract call (about one extra block). The callback re-checks pause, blocklist and balance, so a pause or blocklist change made while the check is in flight still wins (unit test `pause_or_blocklist_during_the_check_still_blocks`).
