@@ -66,6 +66,7 @@
   </ol>
   <p class="dim">Added 2026-11-06 (local demo): the agent's board key can no longer send a bounty reward to another account. <code>submit_work</code> with <code>payout_to</code> set to someone else is refused, so earnings always land in the policy wallet. The testnet board above still runs the 10/30 code.</p>
   <p class="dim">Also 2026-11-06: a failed bounty payout or refund no longer leaves the board saying <code>Paid</code> or <code>Cancelled</code>. A callback puts the bounty back to <code>Submitted</code> or <code>Open</code>, and the NEAR stays on the board (3 unit tests; local wasm only).</p>
+  <p class="dim">Added 2026-11-07: posting a bounty pays for its own storage. The board keeps a fee from the deposit (about 0.03 NEAR for the demo bounty, view <code>storage_fee</code>), so posting and cancelling in a loop costs the poster, not the board. Notes are capped so a record cannot outgrow the fee: a bounty filled to every limit used 3,738 bytes against a fee for 3,967 (unit test). Local wasm only.</p>
 
   <h2>Run it yourself (about 1 minute, no keys)</h2>
   <pre id="cmd">git clone https://github.com/team-attention/countersign

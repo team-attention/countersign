@@ -50,6 +50,13 @@ pub struct BountyBoard {
 }
 
 const MAX_TEXT: usize = 1000;
+const MAX_NOTE: usize = 200;
+const MAX_NOTES: usize = 10;
+/// Storage a bounty can occupy beyond its title, spec and client: record and index
+/// overhead, then the worst case of what later calls add (worker, payout_to, submission,
+/// MAX_NOTES notes of MAX_NOTE bytes). Unit test `storage_fee_covers_worst_case` checks it.
+const BASE_BYTES: u64 = 400;
+const GROWTH_BYTES: u64 = 2 * (1 + 4 + 64) + (1 + 4 + 200) + (MAX_NOTES * (4 + MAX_NOTE)) as u64;
 const CALLBACK_GAS: Gas = Gas::from_tgas(10);
 
 fn emit(event: &str, data: near_sdk::serde_json::Value) {
@@ -69,18 +76,24 @@ impl BountyBoard {
         }
     }
 
-    /// Lock the attached deposit as the reward.
+    /// Lock the attached deposit as the reward, minus `storage_fee`. The fee stays on the
+    /// board for good: a cancelled bounty keeps its record, so posting and cancelling in a
+    /// loop costs the poster, not the board.
     #[payable]
     pub fn post_bounty(&mut self, title: String, spec: String) -> Bounty {
-        let reward = env::attached_deposit();
-        require!(reward > NearToken::from_millinear(10), "reward must be over 0.01 NEAR");
         require!(title.len() <= 120 && spec.len() <= MAX_TEXT, "text too long");
+        let fee = self.storage_fee(env::predecessor_account_id(), title.clone(), spec.clone()).0;
+        let reward = env::attached_deposit().as_yoctonear().saturating_sub(fee);
+        require!(
+            reward > NearToken::from_millinear(10).as_yoctonear(),
+            "reward after the storage fee must be over 0.01 NEAR"
+        );
         let b = Bounty {
             id: self.next_id,
             client: env::predecessor_account_id(),
             title,
             spec,
-            reward: U128(reward.as_yoctonear()),
+            reward: U128(reward),
             status: BountyStatus::Open,
             worker: None,
             payout_to: None,
@@ -122,7 +135,7 @@ impl BountyBoard {
         require!(env::predecessor_account_id() == b.client, "only the client can accept");
         require!(b.status == BountyStatus::Submitted, "nothing submitted");
         b.status = BountyStatus::Paid;
-        b.notes.push(note.unwrap_or_else(|| "accepted".into()));
+        add_note(&mut b, note.unwrap_or_else(|| "accepted".into()));
         self.bounties.insert(id, b.clone());
         emit("bounty_paid", json!(&b));
         Promise::new(b.payout_to.clone().unwrap())
@@ -142,7 +155,7 @@ impl BountyBoard {
         require!(env::predecessor_account_id() == b.client, "only the client can reject");
         require!(b.status == BountyStatus::Submitted, "nothing submitted");
         b.status = BountyStatus::Open;
-        b.notes.push(format!("rejected: {note}"));
+        add_note(&mut b, format!("rejected: {note}"));
         b.worker = None;
         b.payout_to = None;
         b.submission = None;
@@ -179,15 +192,21 @@ impl BountyBoard {
             let mut b = self.get(id);
             if accepted {
                 b.status = BountyStatus::Submitted;
-                b.notes.push("payout failed; reward back on the board".into());
+                add_note(&mut b, "payout failed; reward back on the board".into());
             } else {
                 b.status = BountyStatus::Open;
-                b.notes.push("refund failed; bounty reopened".into());
+                add_note(&mut b, "refund failed; bounty reopened".into());
             }
             self.bounties.insert(id, b.clone());
             emit("payout_failed", json!(&b));
         }
         ok
+    }
+
+    /// What `post_bounty` keeps from the deposit to pay for the bounty's storage.
+    pub fn storage_fee(&self, client: AccountId, title: String, spec: String) -> U128 {
+        let bytes = BASE_BYTES + GROWTH_BYTES + (client.len() + title.len() + spec.len()) as u64;
+        U128(env::storage_byte_cost().as_yoctonear() * bytes as u128)
     }
 
     pub fn get_bounty(&self, id: u64) -> Option<Bounty> {
@@ -208,6 +227,16 @@ impl BountyBoard {
             .cloned()
             .unwrap_or_else(|| env::panic_str("no such bounty"))
     }
+}
+
+/// Notes are capped at MAX_NOTE bytes each and MAX_NOTES per bounty (the newest replaces the
+/// last one), so a client cannot grow a record past what `storage_fee` paid for.
+fn add_note(b: &mut Bounty, note: String) {
+    require!(note.len() <= MAX_NOTE, "note too long");
+    if b.notes.len() >= MAX_NOTES {
+        b.notes.pop();
+    }
+    b.notes.push(note);
 }
 
 #[cfg(test)]
@@ -334,5 +363,64 @@ mod tests {
         c.submit_work(0, accounts(1), "sha256:ab".into());
         as_(accounts(0), NearToken::from_yoctonear(0));
         assert_eq!(c.reject_work(0, "tests fail".into()).status, BountyStatus::Open);
+    }
+
+    #[test]
+    fn storage_fee_covers_worst_case() {
+        let client: AccountId = format!("{}.testnet", "c".repeat(56)).parse().unwrap();
+        let worker: AccountId = format!("{}.testnet", "w".repeat(56)).parse().unwrap();
+        as_(client.clone(), NearToken::from_near(1));
+        let mut c = BountyBoard::new();
+        let (title, spec) = ("t".repeat(120), "s".repeat(MAX_TEXT));
+        let fee = c.storage_fee(client.clone(), title.clone(), spec.clone()).0;
+        let before = env::storage_usage();
+        c.post_bounty(title, spec);
+        for i in 0..MAX_NOTES + 3 {
+            as_(worker.clone(), NearToken::from_yoctonear(0));
+            c.submit_work(0, worker.clone(), "x".repeat(200));
+            as_(client.clone(), NearToken::from_yoctonear(0));
+            if i < MAX_NOTES + 2 {
+                c.reject_work(0, "n".repeat(MAX_NOTE - 10));
+            } else {
+                c.accept(0, Some("a".repeat(MAX_NOTE)));
+            }
+        }
+        c.bounties.flush();
+        let used = env::storage_usage() - before;
+        assert_eq!(c.get_bounty(0).unwrap().notes.len(), MAX_NOTES);
+        assert!(
+            used as u128 * env::storage_byte_cost().as_yoctonear() <= fee,
+            "used {used} bytes, fee covers {}",
+            fee / env::storage_byte_cost().as_yoctonear()
+        );
+    }
+
+    #[test]
+    fn fee_is_kept_from_the_deposit() {
+        as_(accounts(0), NearToken::from_near(1));
+        let mut c = BountyBoard::new();
+        let fee = c.storage_fee(accounts(0), "fix it".into(), "tasks/x".into()).0;
+        let b = c.post_bounty("fix it".into(), "tasks/x".into());
+        assert_eq!(b.reward.0, NearToken::from_near(1).as_yoctonear() - fee);
+    }
+
+    #[test]
+    #[should_panic(expected = "reward after the storage fee must be over 0.01 NEAR")]
+    fn deposit_that_only_covers_storage_is_refused() {
+        as_(accounts(0), NearToken::from_millinear(30));
+        let mut c = BountyBoard::new();
+        c.post_bounty("fix it".into(), "tasks/x".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "note too long")]
+    fn long_note_is_refused() {
+        as_(accounts(0), NearToken::from_near(1));
+        let mut c = BountyBoard::new();
+        c.post_bounty("fix it".into(), "tasks/x".into());
+        as_(accounts(1), NearToken::from_yoctonear(0));
+        c.submit_work(0, accounts(1), "sha256:ab".into());
+        as_(accounts(0), NearToken::from_yoctonear(0));
+        c.accept(0, Some("a".repeat(MAX_NOTE + 1)));
     }
 }

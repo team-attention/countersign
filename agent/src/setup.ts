@@ -10,7 +10,7 @@
 import { Account, KeyPair, type KeyPairString } from "near-api-js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type DeployState, GAS, ROOT, color, near, provider, saveState, step, type Network } from "./near";
+import { type DeployState, GAS, ROOT, color, fmt, near, provider, saveState, step, type Network } from "./near";
 
 const WASM = {
   countersign: join(ROOT, "contracts", "out", "countersign.wasm"),
@@ -131,17 +131,20 @@ export async function setup(opts: {
 
   step("client posts a bounty");
   const client = as("client");
+  const bounty = {
+    title: "split-invoice: every cent must be paid out",
+    spec: "tasks/split-invoice (run `bun test`)",
+  };
+  // The board keeps a storage fee from the deposit, so attach reward + fee.
+  const fee = BigInt(await prov.callFunction({ contractId: ids.board, method: "storage_fee", args: { client: client.accountId, ...bounty } }) as string);
   await client.callFunction({
     contractId: ids.board,
     methodName: "post_bounty",
-    args: {
-      title: "split-invoice: every cent must be paid out",
-      spec: "tasks/split-invoice (run `bun test`)",
-    },
-    deposit: BigInt(near(POLICY.bountyReward)),
+    args: bounty,
+    deposit: BigInt(near(POLICY.bountyReward)) + fee,
     gas: GAS,
   });
-  console.log(`  bounty #0, reward ${POLICY.bountyReward} NEAR locked in ${ids.board}`);
+  console.log(`  bounty #0, reward ${POLICY.bountyReward} NEAR locked in ${ids.board} (plus ${fmt(fee)} storage fee kept by the board)`);
 
   const state: DeployState = {
     network,

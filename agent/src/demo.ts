@@ -18,7 +18,7 @@ try {
 
   const job = await runAgent(s);
   if (!job) throw new Error("agent did not submit");
-  await verifyAndPay(s, job.bountyId, job.patchPath);
+  if (!(await verifyAndPay(s, job.bountyId, job.patchPath))) throw new Error("client rejected the agent's patch; the demo expects it to pass");
 
   step("owner: what is waiting for me?");
   const pending = await view<PaymentRequest[]>(s, s.ids.wallet, "list_pending");

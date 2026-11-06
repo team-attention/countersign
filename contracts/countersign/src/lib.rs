@@ -57,7 +57,9 @@ enum StorageKey {
 pub struct Policy {
     /// Largest single payment that can go out without the owner.
     pub per_payment_limit: U128,
-    /// Total that can go out without the owner within one rolling 24h window.
+    /// Total that can go out without the owner within one 24h window. The window is fixed,
+    /// not rolling: it restarts at the first request after it ends, so up to twice this
+    /// can go out around a window boundary.
     pub daily_limit: U128,
     /// Receivers that may be paid automatically (still subject to the limits).
     pub allowlist: Vec<AccountId>,
