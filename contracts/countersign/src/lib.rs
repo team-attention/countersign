@@ -28,7 +28,7 @@ const MAX_REASON_LEN: usize = 280;
 /// Balance kept on the account for storage; the agent can never spend it.
 const STORAGE_RESERVE: NearToken = NearToken::from_millinear(500);
 const WATCHLIST_CHECK_GAS: Gas = Gas::from_tgas(10);
-const WATCHLIST_REPORT_GAS: Gas = Gas::from_tgas(15);
+const WATCHLIST_REPORT_GAS: Gas = Gas::from_tgas(30);
 const DECIDE_GAS: Gas = Gas::from_tgas(40);
 
 /// The shared watchlist contract (`contracts/watchlist`).

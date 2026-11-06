@@ -2,10 +2,12 @@
 //!
 //! One wallet's owner rejecting a payment says little. Several unrelated owners rejecting
 //! payments to the same receiver says a lot. A member wallet reports a receiver when its owner
-//! calls `reject_and_report`; the report carries the wallet's request id, so anyone can open
-//! that wallet's `get_request` and check that the request exists and was rejected.
+//! calls `reject_and_report`; the report carries the wallet's request id. Before the report
+//! counts, the watchlist calls that wallet's `get_request` itself and records it only if the
+//! request exists, was rejected, and names the same receiver and amount.
 //!
 //! - Only wallets the curator added (`add_member`) can report, one report per wallet per receiver.
+//! - Reason and note are copied from the wallet's request, not from the caller's arguments.
 //! - A receiver is `flagged` once `threshold` distinct wallets reported it.
 //! - Wallets ask `check(receiver)` before deciding a payment: flagged -> blocked,
 //!   reported but under the threshold -> held for the owner.
@@ -14,9 +16,31 @@
 use near_sdk::json_types::U128;
 use near_sdk::serde_json::json;
 use near_sdk::store::{IterableMap, IterableSet};
-use near_sdk::{AccountId, BorshStorageKey, NearToken, PanicOnDefault, env, near, require};
+use near_sdk::{
+    AccountId, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise, PromiseError, env, ext_contract, near,
+    require,
+};
 
 const MAX_REASON_LEN: usize = 280;
+const GET_REQUEST_GAS: Gas = Gas::from_tgas(5);
+const VERIFY_GAS: Gas = Gas::from_tgas(10);
+
+/// The part of a Countersign wallet (`contracts/countersign`) the watchlist reads.
+#[ext_contract(ext_wallet)]
+#[allow(dead_code)]
+trait Wallet {
+    fn get_request(&self, id: u64) -> Option<WalletRequest>;
+}
+
+/// The fields of a Countersign `PaymentRequest` the evidence check needs.
+#[near(serializers = [json])]
+pub struct WalletRequest {
+    pub receiver: AccountId,
+    pub amount: U128,
+    pub reason: String,
+    pub status: String,
+    pub notes: Vec<String>,
+}
 
 #[near(serializers = [borsh])]
 #[derive(BorshStorageKey)]
@@ -91,7 +115,10 @@ impl Watchlist {
     // ---------------------------------------------------------------- member wallets
 
     /// Called by a member wallet contract when its owner rejects a payment and reports it.
-    /// Returns the receiver's new count.
+    /// The report counts only after `on_report_verified` read the request back from the wallet.
+    /// `reason` and `note` are ignored in favour of what the wallet recorded (kept for the
+    /// Countersign call signature).
+    #[allow(unused_variables)]
     pub fn report(
         &mut self,
         receiver: AccountId,
@@ -99,20 +126,47 @@ impl Watchlist {
         amount: U128,
         reason: String,
         note: String,
-    ) -> Check {
+    ) -> Promise {
         let wallet = env::predecessor_account_id();
-        require!(self.members.contains(&wallet), "only member wallets can report");
+        self.assert_can_report(&wallet, &receiver);
+        ext_wallet::ext(wallet.clone())
+            .with_static_gas(GET_REQUEST_GAS)
+            .get_request(request_id)
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(VERIFY_GAS)
+                    .on_report_verified(receiver, wallet, request_id, amount),
+            )
+    }
+
+    /// Records the report if the wallet's own `get_request` backs it up. Returns the receiver's
+    /// new count; panics (and records nothing) if the evidence does not match.
+    #[private]
+    pub fn on_report_verified(
+        &mut self,
+        receiver: AccountId,
+        wallet: AccountId,
+        request_id: u64,
+        amount: U128,
+        #[callback_result] evidence: Result<Option<WalletRequest>, PromiseError>,
+    ) -> Check {
+        let req = match evidence {
+            Ok(Some(req)) => req,
+            Ok(None) => env::panic_str("evidence check failed: no such request in the wallet"),
+            Err(_) => env::panic_str("evidence check failed: the wallet has no readable get_request"),
+        };
+        require!(req.status == "Rejected", "evidence check failed: the request was not rejected");
+        require!(req.receiver == receiver, "evidence check failed: the request pays a different receiver");
+        require!(req.amount == amount, "evidence check failed: the amount does not match");
+        // membership or a duplicate may have changed while the check was in flight
+        self.assert_can_report(&wallet, &receiver);
         let mut list = self.reports.get(&receiver).cloned().unwrap_or_default();
-        require!(
-            !list.iter().any(|r| r.wallet == wallet),
-            "this wallet already reported this receiver"
-        );
         let report = Report {
             wallet,
             request_id,
             amount,
-            reason: trim(reason),
-            note: trim(note),
+            reason: trim(req.reason),
+            note: trim(req.notes.last().cloned().unwrap_or_default()),
             reported_at_ns: env::block_timestamp(),
         };
         emit("reported", json!({"receiver": receiver, "report": report}));
@@ -124,6 +178,17 @@ impl Watchlist {
             emit("flagged", json!(&c));
         }
         c
+    }
+
+    fn assert_can_report(&self, wallet: &AccountId, receiver: &AccountId) {
+        require!(self.members.contains(wallet), "only member wallets can report");
+        require!(
+            !self
+                .reports
+                .get(receiver)
+                .is_some_and(|l| l.iter().any(|r| &r.wallet == wallet)),
+            "this wallet already reported this receiver"
+        );
     }
 
     // ---------------------------------------------------------------- curator
@@ -220,9 +285,26 @@ mod tests {
         w
     }
 
+    fn rejected(status: &str, receiver: AccountId, amount: u128) -> Option<WalletRequest> {
+        Some(WalletRequest {
+            receiver,
+            amount: U128(amount),
+            reason: "license fee".into(),
+            status: status.into(),
+            notes: vec!["injected".into()],
+        })
+    }
+
+    /// `report` followed by the callback, with the wallet's `get_request` answer given directly.
+    fn report_with(w: &mut Watchlist, wallet: AccountId, id: u64, evidence: Option<WalletRequest>) -> Check {
+        as_(wallet.clone(), 0);
+        let _ = w.report(accounts(4), id, U128(5), "caller text".into(), "caller text".into());
+        as_("watchlist.near".parse().unwrap(), 0);
+        w.on_report_verified(accounts(4), wallet, id, U128(5), Ok(evidence))
+    }
+
     fn report(w: &mut Watchlist, wallet: AccountId, id: u64) -> Check {
-        as_(wallet, 0);
-        w.report(accounts(4), id, U128(5), "license fee".into(), "injected".into())
+        report_with(w, wallet, id, rejected("Rejected", accounts(4), 5))
     }
 
     #[test]
@@ -249,6 +331,64 @@ mod tests {
     fn non_member_cannot_report() {
         let mut w = setup();
         report(&mut w, accounts(3), 0);
+    }
+
+    #[test]
+    fn reason_and_note_come_from_the_wallet() {
+        let mut w = setup();
+        report(&mut w, accounts(1), 0);
+        let r = &w.get_reports(accounts(4))[0];
+        assert_eq!((r.reason.as_str(), r.note.as_str()), ("license fee", "injected"));
+    }
+
+    #[test]
+    #[should_panic(expected = "was not rejected")]
+    fn evidence_must_be_rejected() {
+        let mut w = setup();
+        report_with(&mut w, accounts(1), 0, rejected("AutoPaid", accounts(4), 5));
+    }
+
+    #[test]
+    #[should_panic(expected = "different receiver")]
+    fn evidence_must_name_the_receiver() {
+        let mut w = setup();
+        report_with(&mut w, accounts(1), 0, rejected("Rejected", accounts(5), 5));
+    }
+
+    #[test]
+    #[should_panic(expected = "amount does not match")]
+    fn evidence_must_match_the_amount() {
+        let mut w = setup();
+        report_with(&mut w, accounts(1), 0, rejected("Rejected", accounts(4), 6));
+    }
+
+    #[test]
+    #[should_panic(expected = "no such request")]
+    fn evidence_must_exist() {
+        let mut w = setup();
+        report_with(&mut w, accounts(1), 9, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "no readable get_request")]
+    fn member_that_is_not_a_wallet_cannot_report() {
+        let mut w = setup();
+        as_(accounts(1), 0);
+        let _ = w.report(accounts(4), 0, U128(5), "x".into(), "x".into());
+        as_("watchlist.near".parse().unwrap(), 0);
+        w.on_report_verified(accounts(4), accounts(1), 0, U128(5), Err(PromiseError::Failed));
+    }
+
+    #[test]
+    #[should_panic(expected = "only member wallets")]
+    fn member_removed_during_the_check_is_not_counted() {
+        let mut w = setup();
+        as_(accounts(1), 0);
+        let _ = w.report(accounts(4), 0, U128(5), "x".into(), "x".into());
+        as_(accounts(0), 1);
+        w.remove_member(accounts(1));
+        as_("watchlist.near".parse().unwrap(), 0);
+        w.on_report_verified(accounts(4), accounts(1), 0, U128(5), Ok(rejected("Rejected", accounts(4), 5)));
     }
 
     #[test]

@@ -51,8 +51,8 @@ try {
   };
 
   step("deploy the shared watchlist");
-  const curator = await create("curator", "0.2");
-  const watchlist = await create("watchlist", "1.8");
+  const curator = await create("curator", "0.5");
+  const watchlist = await create("watchlist", "2.2");
   await watchlist.deployContract(WASM.watchlist);
   await watchlist.callFunction({ contractId: watchlist.accountId, methodName: "new", args: { curator: curator.accountId, threshold: THRESHOLD }, gas: GAS });
   console.log(`  ${watchlist.accountId}: a receiver is flagged once ${THRESHOLD} different wallets reported it`);
@@ -142,6 +142,19 @@ try {
       console.log(`  ${who}: ${color.green("refused")} ${color.dim(why(e))}`);
     }
   }
+
+  // The curator admits an account that is not a Countersign wallet (a mistake, or a colluding curator).
+  // It is a member, so `report` starts, but the watchlist reads its `get_request` back and finds nothing.
+  await curator.callFunction({ contractId: watchlist.accountId, methodName: "add_member", args: { wallet: stranger.accountId }, deposit: 1n, gas: GAS });
+  try {
+    await stranger.callFunction({ contractId: watchlist.accountId, methodName: "report", args: { receiver: compute.accountId, request_id: 0, amount: near("0.05"), reason: "x", note: "x" }, gas: GAS });
+    console.log(color.red("  member that is not a wallet reports compute: ACCEPTED"));
+    results.attack = "accepted";
+  } catch (e) {
+    console.log(`  member that is not a wallet reports compute: ${color.green("refused")} ${color.dim(why(e))}`);
+  }
+  if ((await view<any>(watchlist.accountId, "check", { receiver: compute.accountId })).reports !== 0) results.attack = "counted";
+  await curator.callFunction({ contractId: watchlist.accountId, methodName: "remove_member", args: { wallet: stranger.accountId }, deposit: 1n, gas: GAS });
 
   step("appeal: the curator clears invoice-desk, wallet c pays it again");
   await curator.callFunction({ contractId: watchlist.accountId, methodName: "clear", args: { receiver: invoiceDesk.accountId, note: "appeal accepted for the demo" }, deposit: 1n, gas: GAS });

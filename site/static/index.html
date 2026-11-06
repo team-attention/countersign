@@ -74,7 +74,7 @@ cd countersign/agent &amp;&amp; bun install &amp;&amp; bun run demo</pre>
   <p class="dim">Starts a local NEAR node, deploys both contracts, runs the whole story, prints its own counts (the local run also pauses the wallet, so it ends with 11 requests). Needs Bun 1.2+ on macOS or Linux.</p>
 
   <h2>Shared watchlist (added 2026-11-02)</h2>
-  <p>One owner rejecting a payment says little. Two unrelated owners rejecting payments to the same receiver says more. Wallets can now join a shared watchlist contract: an owner calls <code>reject_and_report</code>, the watchlist stores the report with that wallet's request id as evidence, and every member wallet checks the watchlist before it decides.</p>
+  <p>One owner rejecting a payment says little. Two unrelated owners rejecting payments to the same receiver says more. Wallets can now join a shared watchlist contract: an owner calls <code>reject_and_report</code>, the watchlist reads that request back from the wallet and counts the report only if it was really rejected for the same receiver and amount, and every member wallet checks the watchlist before it decides.</p>
   <ol>
     <li>Wallet A gets an injected 0.1 NEAR "invoice". Held (not allowlisted). Owner A rejects and reports: 1 of 2.</li>
     <li>Wallet B gets the same invoice. Held, with the note "reported by 1 wallet". Owner B reports too: 2 of 2, flagged.</li>

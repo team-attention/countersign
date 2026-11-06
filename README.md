@@ -40,8 +40,8 @@ On macOS the `near-sandbox` binary links Homebrew's liblzma. If the demo stops w
 - Wallet A: `PENDING` (not allowlisted). Owner A calls `reject_and_report` → `reports 1/2`.
 - Wallet B: `PENDING` with the note `was reported by 1 wallet(s) on the shared watchlist`. Owner B reports → `reports 2/2 FLAGGED`.
 - Wallet C has that receiver on its own allowlist, and the request is still `BLOCKED` (`flagged on the shared watchlist`). A compute payment from wallet C is `AUTO-PAID`.
-- Each report is checked against the reporting wallet: `get_request` shows the rejected request and the owner's note.
-- A non-member account, wallet A's agent key, and a stranger calling `clear` are all refused.
+- Each report is checked against the reporting wallet: `get_request` shows the rejected request and the owner's note. The watchlist does the same check itself before a report counts.
+- A non-member account, wallet A's agent key, and a stranger calling `clear` are all refused. The curator then admits a plain account by mistake; its report is refused too (`evidence check failed: the wallet has no readable get_request`) and nothing is counted.
 - The curator clears the receiver (appeal), and wallet C's next payment to it is `AUTO-PAID`.
 
 Run the contract unit tests (needs Rust and [`cargo-near`](https://github.com/near/cargo-near)):
@@ -50,7 +50,7 @@ Run the contract unit tests (needs Rust and [`cargo-near`](https://github.com/ne
 # from the repository root
 (cd contracts/countersign && cargo test)   # 16 tests
 (cd contracts/bounty-board && cargo test)  # 8 tests
-(cd contracts/watchlist && cargo test)     # 5 tests
+(cd contracts/watchlist && cargo test)     # 12 tests
 ```
 
 ### Step by step on a local node
@@ -99,7 +99,7 @@ The same run, deployed on testnet on 2026-10-30 (bounty earned, injected fee rej
 - Read it yourself: `near contract call-function as-read-only wallet-c-tai7.countersign-wl-l6x7np.testnet list_requests json-args '{}' network-config testnet now` shows `#0 Blocked`, `#1 AutoPaid` (compute), `#2 AutoPaid` (after the appeal)
 - Non-member `report` and non-curator `clear` were refused by the contract (`only member wallets can report`, `only the curator can do this`).
 
-To run it yourself you need a testnet account with about 12 NEAR (three wallets hold ~2.2 NEAR of contract storage each): `cd agent && bun --env-file=../.env.watchlist run watchlist --testnet` with `FUNDER_ID` / `FUNDER_KEY` in that file. Keys of the accounts it creates go to `.state/` (gitignored).
+To run it yourself you need a testnet account with about 13 NEAR (three wallets hold ~2.2 NEAR of contract storage each): `cd agent && bun --env-file=../.env.watchlist run watchlist --testnet` with `FUNDER_ID` / `FUNDER_KEY` in that file. Keys of the accounts it creates go to `.state/` (gitignored).
 
 ## How it works
 
@@ -118,7 +118,7 @@ To run it yourself you need a testnet account with about 12 NEAR (three wallets 
 | --- | --- | --- |
 | Countersign contract | `contracts/countersign/src/lib.rs` | Policy wallet. `request_payment` (agent), `approve` / `reject` / `reject_and_report` / `set_watchlist` / `set_policy` / `set_paused` / `add_agent_key` / `revoke_key` (owner, 1 yoctoNEAR so only a full-access key can sign), views `get_status`, `list_requests`, `list_pending`. Emits NEP-297 `EVENT_JSON` logs for every decision. |
 | Bounty board contract | `contracts/bounty-board/src/lib.rs` | Client locks NEAR, worker submits a patch hash and a payout account, client accepts (pays) or rejects (reopens). |
-| Watchlist contract | `contracts/watchlist/src/lib.rs` | Shared list of receivers that member wallets rejected. `report` (member wallets only, one report per wallet per receiver, carries the request id as evidence), `check`, `get_reports`, `list_flagged`; curator `add_member` / `remove_member` / `clear` (appeal, logged). A Countersign wallet with `set_watchlist` checks it on every request that is not blocked outright: flagged → `BLOCKED`, reported → held for the owner even if allowlisted. |
+| Watchlist contract | `contracts/watchlist/src/lib.rs` | Shared list of receivers that member wallets rejected. `report` (member wallets only, one report per wallet per receiver; the watchlist calls the wallet's `get_request` and counts the report only if that request was rejected and names the same receiver and amount; reason and note are copied from the wallet, not the caller), `check`, `get_reports`, `list_flagged`; curator `add_member` / `remove_member` / `clear` (appeal, logged). A Countersign wallet with `set_watchlist` checks it on every request that is not blocked outright: flagged → `BLOCKED`, reported → held for the owner even if allowlisted. |
 | Agent | `agent/src/agent.ts` | Finds a bounty, pays for compute, solves, runs visible tests, submits with payout to its own wallet. |
 | LLM payment tool | `agent/src/pay.ts` | `./pay <receiver> <amount> <reason>`: the only payment tool the model gets. It asks the wallet. |
 | Client | `agent/src/client.ts` | Checks the patch hash, runs hidden tests from `client/hidden-tests/`, pays or rejects. |
@@ -148,7 +148,7 @@ To run it yourself you need a testnet account with about 12 NEAR (three wallets 
 - The key isolation is on chain, not on the host. In the demo the owner, client and agent keys sit in the same `.state/` folder on one machine, and the client runs submitted code with `bun test` without a sandbox. A real deployment keeps the owner key on another machine and runs untrusted patches in a container.
 - `submit_work` refuses any `payout_to` other than the submitting account (added 2026-11-06, unit tests `worker_cannot_route_reward_elsewhere`, `payout_check_comes_before_bounty_lookup`, attack 7 in `bun run attack`). Before this, a compromised agent's board key could name another account and the bounty reward would skip the wallet policy. The testnet bounty board deployed on 2026-10-30 still runs the older code; the fix is in `contracts/out/bounty_board.wasm` and the sandbox demo.
 - Bounty-board payouts and refunds have a failure callback (added 2026-11-06, `on_payout`): if the transfer fails, the NEAR is back on the board and the bounty returns to `Submitted` (the client can accept again or reject) or, for a refund, to `Open`. Unit tests `failed_payout_returns_to_submitted_and_can_be_accepted_again`, `successful_payout_stays_paid`, `failed_refund_reopens_bounty`; the failure path is not exercised in the sandbox demo. Like the `payout_to` fix, it is not on the 10/30 testnet board.
-- The watchlist stores the reporting wallet and request id as evidence but does not verify them on chain; the demo reads them back with `get_request`. The watchlist demo also keeps the watchlist account's full-access key (it is the curator account).
+- Watchlist evidence is checked on chain (added 2026-11-07, `on_report_verified`): `report` reads the reporting wallet's `get_request` and records nothing unless the request exists, is `Rejected`, and matches receiver and amount. Unit tests `evidence_must_be_rejected`, `evidence_must_name_the_receiver`, `evidence_must_match_the_amount`, `evidence_must_exist`, `member_that_is_not_a_wallet_cannot_report`, `member_removed_during_the_check_is_not_counted`. This trusts that a member runs the Countersign contract; a curator who admits a custom contract that answers `get_request` with a fake rejection still gets a report through. The testnet watchlist from 2026-11-03 runs the older code. The watchlist demo also keeps the watchlist account's full-access key (it is the curator account).
 - The watchlist has a single curator who admits member wallets and handles appeals. Two colluding members could flag an honest receiver until the curator clears it; the threshold and membership are the defense, not cryptography. It has run once on testnet (2026-11-03); the curator is a demo account.
 - With a watchlist set, `request_payment` returns after a cross-contract call (about one extra block). The callback re-checks pause, blocklist and balance, so a pause or blocklist change made while the check is in flight still wins (unit test `pause_or_blocklist_during_the_check_still_blocks`).
 - No NEAR Intents: payments are native NEAR transfers. Intents have no testnet (HACKATHON.md Q-007).
