@@ -2,6 +2,7 @@
 // every call it makes with both of its keys. What can it get out of the wallet?
 import { Account, KeyPair, actions } from "near-api-js";
 import { printDecision, requestPayment } from "./agent";
+import { verifyCheck } from "./verify";
 import { type DeployState, GAS, account, color, near, provider, step, why } from "./near";
 
 // Any call that goes through sets the exit code, except payment requests the policy may
@@ -64,6 +65,9 @@ export async function runAttack(s: DeployState) {
   await attempt("board.submit_work(payout_to = scammer)", () =>
     work.callFunction({ contractId: s.ids.board, methodName: "submit_work", args: { id: 0, payout_to: s.ids.scammer, submission: "sha256:00" }, gas: GAS }),
   );
+
+  step("attack 8: submit a patch that fakes its own test run or reads the client's keys (client side, no chain call)");
+  if (!(await verifyCheck())) process.exitCode = 1;
 }
 
 if (import.meta.main) {

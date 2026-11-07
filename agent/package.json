@@ -10,6 +10,7 @@
     "client": "bun src/client.ts",
     "owner": "bun src/owner.ts",
     "attack": "bun src/attack.ts",
+    "verify-check": "bun src/verify.ts",
     "watchlist": "bun src/watchlist-demo.ts",
     "typecheck": "tsc --noEmit",
     "web": "bun src/web.ts"
