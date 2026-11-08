@@ -1,7 +1,7 @@
 // The client checks submitted work with tests the agent never saw (patch isolated, see verify.ts), then pays or sends it back.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { SANDBOX, verifyPatch } from "./verify";
+import { SANDBOX_LABEL, runnerCheck, verifyPatch } from "./verify";
 import { type DeployState, GAS, ROOT, account, color, events, fmt, loadState, step, view, why } from "./near";
 
 interface Bounty { id: number; spec: string; reward: string; status: string; submission?: string; payout_to?: string }
@@ -11,10 +11,12 @@ export async function verifyAndPay(s: DeployState, id = 0, patchPath = join(ROOT
   const b = await view<Bounty>(s, s.ids.board, "get_bounty", { id });
   if (b.status !== "Submitted") throw new Error(`bounty #${id} is ${b.status}, nothing to check`);
   if (!existsSync(patchPath)) throw new Error(`patch not found: ${patchPath}`);
+  const runner = runnerCheck();
+  if (!runner.ok) throw new Error(`patch runner ${runner.summary}; leaving bounty #${id} submitted instead of rejecting work it cannot run`);
   const v = await verifyPatch(patchPath).catch((e: Error) => ({ ok: false, hash: "", summary: e.message }));
   const hashOk = v.hash === b.submission;
   console.log(`  patch matches on-chain hash: ${hashOk ? color.green("yes") : color.red("no")}`);
-  console.log(`  hidden + visible tests (patch sandbox: ${SANDBOX}): ${v.ok ? color.green("pass") : color.red("fail")} (${v.summary})`);
+  console.log(`  hidden + visible tests (patch sandbox: ${SANDBOX_LABEL}): ${v.ok ? color.green("pass") : color.red("fail")} (${v.summary})`);
 
   const client = account(s, s.ids.client, s.keys.client);
   if (hashOk && v.ok) {

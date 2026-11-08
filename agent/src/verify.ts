@@ -1,6 +1,7 @@
 // How the client runs a submitted patch against tests the agent never saw, without letting the patch touch the
 // test runner, the client's keys or the network.
 import { $ } from "bun";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -14,8 +15,18 @@ const EXPORTS = ["splitInvoice"];
 
 export interface Verdict { ok: boolean; hash: string; pass: number; total: number; summary: string; output: string }
 
-/** macOS sandbox-exec when present: the patch process gets no network, writes only its own folder, and cannot read this repo, the test folder or key folders. */
-export const SANDBOX = existsSync("/usr/bin/sandbox-exec") ? "sandbox-exec" : "none";
+/**
+ * macOS sandbox-exec when it runs: the patch process gets no network, writes only its own folder, and cannot read this repo,
+ * the test folder or key folders. Inside another sandbox (a coding agent's shell, for one) sandbox-exec exists but exits 71
+ * "Operation not permitted" (unless the profile is the outer one word for word, so the probe uses one that is not);
+ * then patches run without OS isolation, as on Linux, and the check line says so.
+ */
+export const SANDBOX: "sandbox-exec" | "none" | "unavailable" = !existsSync("/usr/bin/sandbox-exec")
+  ? "none"
+  : spawnSync("/usr/bin/sandbox-exec", ["-p", `(version 1)(allow default)(deny network*)(deny file-read* (subpath "${tmpdir()}/sandbox-probe-${process.pid}"))`, "/usr/bin/true"]).status === 0
+    ? "sandbox-exec"
+    : "unavailable";
+export const SANDBOX_LABEL = SANDBOX === "unavailable" ? "unavailable (already inside a sandbox; patches run without OS isolation)" : SANDBOX;
 
 function sandboxProfile(patchDir: string, testDir: string) {
   const deny = [ROOT, testDir, ...[".ssh", ".near-credentials", ".config", ".aws"].map((d) => join(homedir(), d))]
@@ -24,10 +35,14 @@ function sandboxProfile(patchDir: string, testDir: string) {
   return `(version 1)(allow default)(deny network*)(deny file-read* ${deny})(deny file-write* (require-not (subpath ${JSON.stringify(patchDir)})) (require-not (literal "/dev/null")))`;
 }
 
+function patchCommand(patchDir: string, testDir: string) {
+  const sandbox = SANDBOX === "sandbox-exec" ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(patchDir, testDir)] : [];
+  return [...sandbox, process.execPath, join(patchDir, "patch-runner.ts"), join(patchDir, "patch.ts")];
+}
+
 /** The module the tests import. Each call runs the patch's export of the same name in a fresh child process (10 s, PATH only). */
 function proxyModule(patchDir: string, testDir: string) {
-  const sandbox = SANDBOX === "sandbox-exec" ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(patchDir, testDir)] : [];
-  const cmd = [...sandbox, process.execPath, join(patchDir, "patch-runner.ts"), join(patchDir, "patch.ts")];
+  const cmd = patchCommand(patchDir, testDir);
   return `import { spawnSync } from "node:child_process";
 const CMD = ${JSON.stringify(cmd)};
 function call(name: string, args: unknown[]) {
@@ -40,6 +55,26 @@ function call(name: string, args: unknown[]) {
 }
 ${EXPORTS.map((n) => `export function ${n}(...args: unknown[]): any { return call(${JSON.stringify(n)}, args); }`).join("\n")}
 `;
+}
+
+/**
+ * Known-good control: a patch that returns its arguments must come back through the child process unchanged.
+ * Without it a broken runner fails every patch, and "the attacks failed" would look like a working check.
+ */
+export function runnerCheck() {
+  const patchDir = realpathSync(mkdtempSync(join(tmpdir(), "countersign-echo-")));
+  try {
+    writeFileSync(join(patchDir, "patch.ts"), "export function echo(...a: unknown[]) { return a; }\n");
+    cpSync(join(import.meta.dir, "patch-runner.ts"), join(patchDir, "patch-runner.ts"));
+    const [cmd, ...rest] = patchCommand(patchDir, HIDDEN_DIR);
+    const args = [1000, [1, 2]];
+    const r = spawnSync(cmd!, [...rest, "echo"], { input: JSON.stringify(args), cwd: patchDir, timeout: 10_000, encoding: "utf8", env: { PATH: process.env.PATH } });
+    const last = (r.stdout ?? "").trim().split("\n").pop() ?? "";
+    const ok = r.status === 0 && last === JSON.stringify({ value: args });
+    return { ok, summary: ok ? "echo patch round-trips" : `BROKEN: echo patch gave ${JSON.stringify(last || r.stderr?.trim().split("\n").pop() || "")} (exit ${r.status})` };
+  } finally {
+    rmSync(patchDir, { recursive: true, force: true });
+  }
 }
 
 /** Number of test() calls in a folder, counted by the client, not taken from the test runner's report. */
@@ -108,10 +143,12 @@ export const ATTACKS: Record<string, string> = {
   "read-keys": `import { readdirSync } from "node:fs";\nexport function splitInvoice(total: number, w: number[]) {\n  readdirSync(${JSON.stringify(join(ROOT, ".state"))});\n  return w.map((_, i) => (i === 0 ? total : 0));\n}`,
 };
 
-/** Check the client's verifier: the recorded fix passes, every attack fails, a patch touching the tests is refused. */
+/** Check the client's verifier: a known-good echo patch round-trips, the recorded fix passes, every attack fails, a patch touching the tests is refused. */
 export async function verifyCheck() {
   const tmp = mkdtempSync(join(tmpdir(), "countersign-attacks-"));
   const rows: [string, string, boolean][] = [];
+  const runner = runnerCheck();
+  rows.push(["patch runner", runner.summary, runner.ok]);
   try {
     const fix = await verifyPatch(join(import.meta.dir, "..", "replay", "split-invoice.patch"));
     rows.push(["recorded fix", fix.summary, fix.ok]);
@@ -126,7 +163,7 @@ export async function verifyCheck() {
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
-  console.log(`  patch sandbox: ${SANDBOX}`);
+  console.log(`  patch sandbox: ${SANDBOX_LABEL}`);
   for (const [name, result, good] of rows) console.log(`  ${good ? "ok  " : "FAIL"} ${name.padEnd(30)} ${result}`);
   return rows.every((r) => r[2]);
 }
