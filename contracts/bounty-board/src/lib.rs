@@ -164,11 +164,22 @@ impl BountyBoard {
         b
     }
 
-    /// Client takes an open bounty back. A failed refund reopens it (see `on_payout`).
+    /// Client takes the bounty back, open or with a submission waiting (anyone can occupy an
+    /// open bounty with a junk submission, so the client must not need to reject first and
+    /// race it). A failed refund reopens it (see `on_payout`).
     pub fn cancel(&mut self, id: u64) -> Bounty {
         let mut b = self.get(id);
         require!(env::predecessor_account_id() == b.client, "only the client can cancel");
-        require!(b.status == BountyStatus::Open, "only open bounties can be cancelled");
+        require!(
+            matches!(b.status, BountyStatus::Open | BountyStatus::Submitted),
+            "only open or submitted bounties can be cancelled"
+        );
+        if b.status == BountyStatus::Submitted {
+            add_note(&mut b, "cancelled with a submission waiting".into());
+            b.worker = None;
+            b.payout_to = None;
+            b.submission = None;
+        }
         b.status = BountyStatus::Cancelled;
         self.bounties.insert(id, b.clone());
         emit("bounty_cancelled", json!(&b));
@@ -352,6 +363,27 @@ mod tests {
         callback(PromiseResult::Failed);
         assert!(!c.on_payout(0, false));
         assert_eq!(c.get_bounty(0).unwrap().status, BountyStatus::Open);
+    }
+
+    #[test]
+    fn client_can_cancel_with_a_submission_waiting() {
+        as_(accounts(0), NearToken::from_near(1));
+        let mut c = BountyBoard::new();
+        c.post_bounty("fix it".into(), "tasks/x".into());
+        as_(accounts(1), NearToken::from_yoctonear(0));
+        c.submit_work(0, accounts(1), "".into());
+        as_(accounts(0), NearToken::from_yoctonear(0));
+        let b = c.cancel(0);
+        assert_eq!(b.status, BountyStatus::Cancelled);
+        assert_eq!(b.worker, None);
+        assert_eq!(b.submission, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "only open or submitted bounties can be cancelled")]
+    fn paid_bounty_cannot_be_cancelled() {
+        let mut c = accepted_board();
+        c.cancel(0);
     }
 
     #[test]

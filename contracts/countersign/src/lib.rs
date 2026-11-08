@@ -457,8 +457,10 @@ impl Countersign {
         }
     }
 
+    /// `window_ns` is the start of the window the payment was counted in. A failure that
+    /// lands after the window rolled over must not lower the new window's total.
     #[private]
-    pub fn on_transfer(&mut self, id: u64, amount: U128, auto: bool) -> bool {
+    pub fn on_transfer(&mut self, id: u64, amount: U128, auto: bool, window_ns: u64) -> bool {
         self.in_flight = self.in_flight.saturating_sub(amount.0);
         let ok = env::promise_result_checked(0, 64).is_ok();
         if !ok {
@@ -466,7 +468,7 @@ impl Countersign {
                 req.status = Status::Failed;
                 req.notes
                     .push("transfer failed; funds returned to the wallet".to_string());
-                if auto {
+                if auto && window_ns == self.window_start_ns {
                     self.auto_spent_in_window = self.auto_spent_in_window.saturating_sub(amount.0);
                 }
                 self.requests.insert(id, req.clone());
@@ -540,7 +542,7 @@ impl Countersign {
         self.in_flight += amount;
         Promise::new(receiver)
             .transfer(NearToken::from_yoctonear(amount))
-            .then(Self::ext(env::current_account_id()).on_transfer(id, U128(amount), auto))
+            .then(Self::ext(env::current_account_id()).on_transfer(id, U128(amount), auto, self.window_start_ns))
             .detach();
     }
 
@@ -668,6 +670,48 @@ mod tests {
         let r = w.rp(accounts(2), U128(NEAR / 10), "compute".into());
         assert_eq!(r.status, Status::AutoPaid);
         assert_eq!(w.get_status().auto_spent_today.0, NEAR / 10);
+    }
+
+    fn transfer_result_at(ts: u64, result: near_sdk::PromiseResult) {
+        let mut b = ctx("wallet.near".parse().unwrap(), 0);
+        b.block_timestamp(ts);
+        testing_env!(
+            b.build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![result]
+        );
+    }
+
+    #[test]
+    fn failed_transfer_in_same_window_frees_the_limit() {
+        let mut w = wallet();
+        as_agent();
+        w.rp(accounts(2), U128(NEAR / 10), "compute".into());
+        let window = w.get_status().window_started_at_ns;
+        transfer_result_at(window + 1, near_sdk::PromiseResult::Failed);
+        assert!(!w.on_transfer(0, U128(NEAR / 10), true, window));
+        assert_eq!(w.get_status().auto_spent_today.0, 0);
+    }
+
+    #[test]
+    fn late_failure_does_not_lower_the_next_window() {
+        let mut w = wallet();
+        as_agent();
+        w.rp(accounts(2), U128(NEAR / 10), "compute".into());
+        let old = w.get_status().window_started_at_ns;
+        // a day later the window rolls and the agent spends again
+        let mut b = ctx(accounts(1), 0);
+        b.block_timestamp(old + DAY_NS + 5);
+        testing_env!(b.build());
+        w.rp(accounts(2), U128(NEAR / 2), "compute".into());
+        assert_eq!(w.get_status().auto_spent_today.0, NEAR / 2);
+        // only now does the first transfer's failure arrive
+        transfer_result_at(old + DAY_NS + 6, near_sdk::PromiseResult::Failed);
+        assert!(!w.on_transfer(0, U128(NEAR / 10), true, old));
+        assert_eq!(w.get_status().auto_spent_today.0, NEAR / 2);
+        assert_eq!(w.get_request(0).unwrap().status, Status::Failed);
     }
 
     #[test]
