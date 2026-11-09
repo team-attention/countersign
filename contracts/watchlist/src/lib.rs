@@ -12,6 +12,8 @@
 //! - Wallets ask `check(receiver)` before deciding a payment: flagged -> blocked,
 //!   reported but under the threshold -> held for the owner.
 //! - The curator can `clear` a receiver (an appeal). Clearing is logged; reports are not edited.
+//!   After a clear, only rejections the wallet decided later count: a report still in flight
+//!   during the clear, or an old rejection sent again, is refused.
 
 use near_sdk::json_types::U128;
 use near_sdk::serde_json::json;
@@ -40,6 +42,7 @@ pub struct WalletRequest {
     pub reason: String,
     pub status: String,
     pub notes: Vec<String>,
+    pub decided_at_ns: Option<u64>,
 }
 
 #[near(serializers = [borsh])]
@@ -86,6 +89,16 @@ fn emit(event: &str, data: near_sdk::serde_json::Value) {
         "EVENT_JSON:{}",
         json!({"standard": "countersign-watchlist", "version": "1.0.0", "event": event, "data": [data]})
     ));
+}
+
+/// Raw key (outside the state struct, so deployed state stays readable) holding the block time
+/// of the last `clear` for a receiver.
+fn cleared_key(receiver: &AccountId) -> Vec<u8> {
+    [b"cleared_at:".as_slice(), receiver.as_bytes()].concat()
+}
+
+fn cleared_at(receiver: &AccountId) -> Option<u64> {
+    env::storage_read(&cleared_key(receiver)).map(|v| u64::from_le_bytes(v.try_into().unwrap()))
 }
 
 fn trim(mut s: String) -> String {
@@ -158,6 +171,12 @@ impl Watchlist {
         require!(req.status == "Rejected", "evidence check failed: the request was not rejected");
         require!(req.receiver == receiver, "evidence check failed: the request pays a different receiver");
         require!(req.amount == amount, "evidence check failed: the amount does not match");
+        if let Some(t) = cleared_at(&receiver) {
+            require!(
+                req.decided_at_ns.is_some_and(|d| d > t),
+                "evidence check failed: the rejection was decided before the curator's last clear"
+            );
+        }
         // membership or a duplicate may have changed while the check was in flight
         self.assert_can_report(&wallet, &receiver);
         let mut list = self.reports.get(&receiver).cloned().unwrap_or_default();
@@ -212,6 +231,7 @@ impl Watchlist {
     pub fn clear(&mut self, receiver: AccountId, note: String) {
         self.assert_curator();
         let removed = self.reports.remove(&receiver).map(|l| l.len()).unwrap_or(0);
+        env::storage_write(&cleared_key(&receiver), &env::block_timestamp().to_le_bytes());
         emit(
             "cleared",
             json!({"receiver": receiver, "reports_removed": removed, "note": trim(note)}),
@@ -269,9 +289,14 @@ mod tests {
     use near_sdk::testing_env;
 
     fn as_(who: AccountId, deposit: u128) {
+        as_at(who, deposit, 10);
+    }
+
+    fn as_at(who: AccountId, deposit: u128, now_ns: u64) {
         let mut b = VMContextBuilder::new();
         b.current_account_id("watchlist.near".parse().unwrap())
             .predecessor_account_id(who)
+            .block_timestamp(now_ns)
             .attached_deposit(NearToken::from_yoctonear(deposit));
         testing_env!(b.build());
     }
@@ -292,6 +317,7 @@ mod tests {
             reason: "license fee".into(),
             status: status.into(),
             notes: vec!["injected".into()],
+            decided_at_ns: Some(5),
         })
     }
 
@@ -408,5 +434,42 @@ mod tests {
         w.clear(accounts(4), "appeal accepted".into());
         assert!(!w.check(accounts(4)).flagged);
         assert!(w.list_flagged().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "before the curator's last clear")]
+    fn report_in_flight_during_a_clear_is_not_counted() {
+        let mut w = setup();
+        as_(accounts(1), 0);
+        let _ = w.report(accounts(4), 0, U128(5), "x".into(), "x".into());
+        as_(accounts(0), 1);
+        w.clear(accounts(4), "appeal accepted".into());
+        as_("watchlist.near".parse().unwrap(), 0);
+        w.on_report_verified(accounts(4), accounts(1), 0, U128(5), Ok(rejected("Rejected", accounts(4), 5)));
+    }
+
+    #[test]
+    #[should_panic(expected = "before the curator's last clear")]
+    fn old_rejection_cannot_undo_a_clear() {
+        let mut w = setup();
+        report(&mut w, accounts(1), 0);
+        as_(accounts(0), 1);
+        w.clear(accounts(4), "appeal accepted".into());
+        report(&mut w, accounts(1), 0);
+    }
+
+    #[test]
+    fn rejection_decided_after_a_clear_counts() {
+        let mut w = setup();
+        report(&mut w, accounts(1), 0);
+        as_(accounts(0), 1);
+        w.clear(accounts(4), "appeal accepted".into());
+        let mut later = rejected("Rejected", accounts(4), 5);
+        later.as_mut().unwrap().decided_at_ns = Some(20);
+        as_at(accounts(1), 0, 30);
+        let _ = w.report(accounts(4), 1, U128(5), "x".into(), "x".into());
+        as_at("watchlist.near".parse().unwrap(), 0, 30);
+        let c = w.on_report_verified(accounts(4), accounts(1), 1, U128(5), Ok(later));
+        assert_eq!((c.reports, c.flagged), (1, false));
     }
 }

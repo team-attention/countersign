@@ -19,14 +19,23 @@ export interface Verdict { ok: boolean; hash: string; pass: number; total: numbe
  * macOS sandbox-exec when it runs: the patch process gets no network, writes only its own folder, and cannot read this repo,
  * the test folder or key folders. Inside another sandbox (a coding agent's shell, for one) sandbox-exec exists but exits 71
  * "Operation not permitted" (unless the profile is the outer one word for word, so the probe uses one that is not);
- * then patches run without OS isolation, as on Linux, and the check line says so.
+ * then patches run without OS isolation, as on Linux, and the check line says so. Any other probe failure is "failed":
+ * patches still go through sandbox-exec, so the echo check below fails and the client stops instead of running them bare.
  */
-export const SANDBOX: "sandbox-exec" | "none" | "unavailable" = !existsSync("/usr/bin/sandbox-exec")
+const PROBE = existsSync("/usr/bin/sandbox-exec")
+  ? spawnSync("/usr/bin/sandbox-exec", ["-p", `(version 1)(allow default)(deny network*)(deny file-read* (subpath "${tmpdir()}/sandbox-probe-${process.pid}"))`, "/usr/bin/true"], { encoding: "utf8" })
+  : null;
+export const SANDBOX: "sandbox-exec" | "none" | "unavailable" | "failed" = !PROBE
   ? "none"
-  : spawnSync("/usr/bin/sandbox-exec", ["-p", `(version 1)(allow default)(deny network*)(deny file-read* (subpath "${tmpdir()}/sandbox-probe-${process.pid}"))`, "/usr/bin/true"]).status === 0
+  : PROBE.status === 0
     ? "sandbox-exec"
-    : "unavailable";
-export const SANDBOX_LABEL = SANDBOX === "unavailable" ? "unavailable (already inside a sandbox; patches run without OS isolation)" : SANDBOX;
+    : PROBE.status === 71 && /not permitted/.test(PROBE.stderr ?? "")
+      ? "unavailable"
+      : "failed";
+export const SANDBOX_LABEL =
+  SANDBOX === "unavailable" ? "unavailable (already inside a sandbox; patches run without OS isolation)"
+  : SANDBOX === "failed" ? `failed (sandbox-exec probe exit ${PROBE?.status}; patches are not run)`
+  : SANDBOX;
 
 function sandboxProfile(patchDir: string, testDir: string) {
   const deny = [ROOT, testDir, ...[".ssh", ".near-credentials", ".config", ".aws"].map((d) => join(homedir(), d))]
@@ -36,7 +45,7 @@ function sandboxProfile(patchDir: string, testDir: string) {
 }
 
 function patchCommand(patchDir: string, testDir: string) {
-  const sandbox = SANDBOX === "sandbox-exec" ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(patchDir, testDir)] : [];
+  const sandbox = SANDBOX === "sandbox-exec" || SANDBOX === "failed" ? ["/usr/bin/sandbox-exec", "-p", sandboxProfile(patchDir, testDir)] : [];
   return [...sandbox, process.execPath, join(patchDir, "patch-runner.ts"), join(patchDir, "patch.ts")];
 }
 
@@ -136,11 +145,27 @@ async function patchFor(source: string, dir: string, name: string) {
   return file;
 }
 
-/** Patches that must not get paid: each one beat the old in-process check or tries to read the client's keys. */
+/**
+ * Patches that must not get paid: each one beat the old in-process check or tries to read the client's keys.
+ * read-keys is the recorded fix plus a read of the key folder, so it fails only if the read is blocked.
+ */
 export const ATTACKS: Record<string, string> = {
   "exit-early": `process.exit(0);\nexport function splitInvoice() { return []; }`,
   "fake-report": `process.stderr.write("\\n 99 pass\\n 0 fail\\n");\nprocess.exit(0);\nexport function splitInvoice() { return []; }`,
-  "read-keys": `import { readdirSync } from "node:fs";\nexport function splitInvoice(total: number, w: number[]) {\n  readdirSync(${JSON.stringify(join(ROOT, ".state"))});\n  return w.map((_, i) => (i === 0 ? total : 0));\n}`,
+  "read-keys": `import { readdirSync } from "node:fs";
+export function splitInvoice(total: number, w: number[]) {
+  readdirSync(${JSON.stringify(ROOT)});
+  const sum = w.reduce((a, b) => a + b, 0);
+  if (!Number.isInteger(total) || total < 0 || w.length === 0 || sum <= 0) throw new Error("bad input");
+  const exact = w.map((x) => (total * x) / sum);
+  const parts = exact.map(Math.floor);
+  let left = total - parts.reduce((a, b) => a + b, 0);
+  for (const { i } of exact.map((x, i) => ({ i, rem: x - Math.floor(x) })).sort((a, b) => b.rem - a.rem || a.i - b.i)) {
+    if (left-- <= 0) break;
+    parts[i]! += 1;
+  }
+  return parts;
+}`,
 };
 
 /** Check the client's verifier: a known-good echo patch round-trips, the recorded fix passes, every attack fails, a patch touching the tests is refused. */
@@ -154,7 +179,12 @@ export async function verifyCheck() {
     rows.push(["recorded fix", fix.summary, fix.ok]);
     for (const [name, src] of Object.entries(ATTACKS)) {
       const v = await verifyPatch(await patchFor(src, tmp, name));
-      rows.push([name, v.summary + (/EPERM|not permitted/.test(v.output) ? " (key folder read blocked: EPERM)" : ""), !v.ok]);
+      if (name === "read-keys" && SANDBOX !== "sandbox-exec") {
+        // without OS isolation the read succeeds and the correct answer gets paid; say so instead of passing the row
+        rows.push([name, `${v.summary} (${v.ok ? "read NOT blocked: no OS isolation here" : "unexpected failure"})`, v.ok]);
+        continue;
+      }
+      rows.push([name, v.summary + (/EPERM|not permitted/.test(v.output) ? " (repo read blocked: EPERM)" : ""), !v.ok]);
     }
     const testPatch = join(tmp, "touch-tests.patch");
     writeFileSync(testPatch, readFileSync(join(import.meta.dir, "..", "replay", "split-invoice.patch"), "utf8") + `--- a/test/split.test.ts\n+++ b/test/split.test.ts\n@@ -1,1 +1,1 @@\n-import { expect, test } from "bun:test";\n+import { expect, test } from "bun:test"; // edited\n`);

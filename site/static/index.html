@@ -82,7 +82,7 @@ cd countersign/agent &amp;&amp; bun install &amp;&amp; bun run demo</pre>
     <li>Wallet A gets an injected 0.1 NEAR "invoice". Held (not allowlisted). Owner A rejects and reports: 1 of 2.</li>
     <li>Wallet B gets the same invoice. Held, with the note "reported by 1 wallet". Owner B reports too: 2 of 2, flagged.</li>
     <li>Wallet C had that receiver on its own allowlist. Its request is <b>blocked</b>: "flagged on the shared watchlist". A compute payment in the same wallet still auto-pays.</li>
-    <li>A non-member, an agent key, and a stranger trying to clear the flag are all refused. The curator can clear a receiver on appeal; that is logged.</li>
+    <li>A non-member, an agent key, and a stranger trying to clear the flag are all refused. The curator can clear a receiver on appeal; that is logged, and a report still in flight or an old rejection sent again cannot undo it.</li>
   </ol>
   <pre>cd countersign/agent &amp;&amp; bun run watchlist</pre>
   <p class="dim">About 20 seconds on a local node: 3 wallets, 3 owners, 1 watchlist. Each report can be checked with <code>get_request</code> on the wallet that filed it.</p>

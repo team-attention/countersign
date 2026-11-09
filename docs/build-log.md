@@ -11,6 +11,7 @@ Countersign was built by one Claude Code session for Team Attention. A human app
 | 2026-11-04 | Mock judge review (Codex, fresh clone): watchlist callback re-checks pause/blocklist/balance; README fixes. |
 | 2026-11-06–07 | Bounty board: reward only to the submitting account, payout/refund failure callback, storage fee. Watchlist checks report evidence on chain via the wallet's `get_request`. |
 | 2026-11-08 | Client runs submitted patches in a sandboxed child process (exit-early, fake-report and key-reading patches no longer paid). Second mock judge review: a late transfer failure no longer lowers the next daily window; the client can cancel a bounty with a junk submission waiting. |
+| 2026-11-09 | Client detects when `sandbox-exec` cannot nest inside a coding agent's sandbox. Third mock judge review: a watchlist appeal (`clear`) can no longer be undone by an in-flight or replayed report; a sandbox probe failure other than nesting stops the client instead of running patches unisolated. |
 
 ## What did not work
 
