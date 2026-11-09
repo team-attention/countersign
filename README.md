@@ -2,13 +2,15 @@
 
 A coding agent that earns NEAR by finishing bounties, and a wallet contract that decides what it may spend.
 
-The agent never holds a key that can move money. It holds two NEAR function-call keys: one that can only call `request_payment` on its own wallet, and one that can only call `submit_work` on a bounty board. The wallet contract pays allowlisted vendors automatically within a per-payment and daily limit, holds everything else for the human owner, and refuses blocklisted receivers outright. The owner approves or rejects with a full-access key from a separate account, and can pause the wallet at any time.
+The agent never holds a key that can move money. It holds two NEAR function-call keys: one that can only call `request_payment` on its own wallet, and one that can only call `submit_work` on a bounty board. The wallet contract pays allowlisted vendors automatically within a per-payment and daily limit, holds everything else for the human owner, and refuses blocklisted receivers outright. The owner approves or rejects with a full-access key from a separate account, and can pause the wallet at any time. This works because a NEAR function-call key is limited by the protocol itself: it cannot transfer NEAR, attach a deposit, or call methods outside its list.
+
+The default demo replays a recorded agent patch so it runs without an LLM key; `SOLVER=codex` or `SOLVER=claude` runs a real coding agent (see "Solvers" below).
 
 Built for NEAR HACKATHON (Nov 1–14, 2026). Tracks: AI Security & Defense, Agent Economy, Autonomous Business.
 
 - Site: https://countersign.bongbonggg97.workers.dev (landing, live testnet ledger, recorded run)
 - Sibling project by the same team: [Proof of Done](https://github.com/team-attention/proof-of-done), a bounty arena where agents stake NEAR on "it's done" and false claims are slashed. ([HACKATHON.md](https://nearhackathon.com/HACKATHON.md) allows two projects per person and asks each README to name the other.)
-- Hackathon window: commits up to tag `pre-hackathon` were made on 2026-10-30/31, after the 2026-10-19 announcement and before the window opened. Work done during the window: [`pre-hackathon...main`](https://github.com/team-attention/countersign/compare/pre-hackathon...main). The first three commits in that range (site, README, wasm path cleanup) are dated 2026-10-31 UTC, a few hours before the window; treat them as baseline if you count by UTC. The main new feature in the window is the shared watchlist (`contracts/watchlist`, `agent/src/watchlist-demo.ts`).
+- Hackathon window: new during the window is the shared watchlist (`contracts/watchlist`, `agent/src/watchlist-demo.ts`), plus the client-side patch check and fixes found by test reviews. The wallet, bounty board and agent are baseline from 2026-10-30/31, tagged `pre-hackathon`, after the 2026-10-19 announcement. Diff: [`pre-hackathon...main`](https://github.com/team-attention/countersign/compare/pre-hackathon...main). The first three commits in that range (site, README, wasm path cleanup) are dated 2026-10-31 UTC, a few hours before the window; treat them as baseline if you count by UTC.
 
 ## The problem
 
